@@ -1,0 +1,46 @@
+# 阶段 0 · TinyML 关键词唤醒 —— 训练依赖
+#
+# 安装方式（Windows PowerShell，在本目录下执行）：
+#     .\setup_env.ps1
+#
+# 或手动：
+#     python -m venv venv
+#     .\venv\Scripts\Activate.ps1
+#     python -m pip install --upgrade pip
+#     python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# ============================================================
+# 为什么分成两个文件
+# ============================================================
+# 本文件只包含「训练 + 评估 + 剖析」需要的包。
+# 导出 INT8 需要的 tensorflow-cpu 放在 requirements-export.txt，
+# 大约第 3-4 周用到时再装。
+#
+# 这样拆分有两个实际好处：
+#   1. 第 1-2 周不用下载 351 MB 的 TensorFlow，能更快开始训练。
+#   2. 装出问题时能立刻定位是哪一批引入的。
+#
+# 这个拆分本身就是一次事故换来的教训：曾经把 tensorflow + onnx + onnx2tf
+# 一次性装下去，onnx2tf 引入 onnxruntime / onnxsim / onnxoptimizer / onnxscript
+# 一条深依赖链，pip 卡在解析阶段 41 分钟，然后开始卸载 torch/numpy/matplotlib，
+# 卸载完卡死，整个虚拟环境报废，只能 rm -rf venv 重建。
+# 大依赖分批装，中间验证，是有必要的。
+#
+# ============================================================
+# 版本说明
+# ============================================================
+# 1. torch 用 PyPI 上的 Windows 默认轮子，本身就是 CPU 版（约 122 MB）。
+#    如果在 Linux 上装，默认会拉 CUDA 版（2.5 GB+），需要改成：
+#       pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 2. 版本已实测可用（Python 3.13 / Windows）。不要随手升级。
+# 3. 国内网络建议全程加清华镜像源，速度差 5-10 倍。
+
+# ---------- 训练 ----------
+torch==2.13.0
+torchaudio==2.11.0
+
+# ---------- 数据与可视化 ----------
+numpy==2.5.2
+matplotlib==3.11.1
+tqdm==4.70.0
+scikit-learn==1.9.0

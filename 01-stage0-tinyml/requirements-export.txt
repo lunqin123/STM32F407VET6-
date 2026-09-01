@@ -1,0 +1,34 @@
+# 阶段 0 · 导出 INT8 TFLite 的依赖
+#
+# 什么时候装：第 3-4 周，准备跑 src\export_tflite.py 之前。
+# 第 1-2 周只用训练的话，不需要装这个文件。
+#
+#     pip install -r requirements-export.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 装完验证：
+#     python -c "import tensorflow as tf; print(tf.__version__, hasattr(tf.lite,'TFLiteConverter'))"
+#
+# ============================================================
+# 只要 TensorFlow，不要 onnx / onnx2tf
+# ============================================================
+# 本仓库的导出走「Keras 手工重建 + 权重搬运 + 数值一致性验证」，
+# 只用得到 tensorflow。ONNX 中转方案被放弃了，两个原因：
+#
+#   A. 技术：自动转换器的错误是**静默**的。onnx2tf 若在算子上做等价变换
+#      （拆 depthwise conv、改 padding 语义），转换会"成功"，
+#      产出一个能跑但精度已崩的模型，要部署到板子上才会发现。
+#
+#   B. 工程：onnx2tf 的依赖树会拖垮环境。实测
+#         pip install tensorflow-cpu onnx onnx2tf
+#      引入 onnxruntime==1.26.0 / onnxsim==0.6.5 / onnxoptimizer==0.4.2 /
+#      onnxscript==0.6.2 / onnx_ir>=0.1.15，pip 解析 41 分钟未完成，
+#      随后大规模卸载 torch/numpy/matplotlib/scipy/scikit-learn 并卡死，
+#      虚拟环境报废。
+#
+# 如果将来确实想试 ONNX 中转，请**单独**建一个虚拟环境，
+# 不要和训练环境混在一起。
+#
+# 另注：ai-edge-torch（Google 官方 PyTorch 直转 TFLite）在 py3.13/Windows 上
+#       全部版本均无法安装，实测记录见 手册-阶段0.md 第 5.3 节，不必再试。
+
+tensorflow-cpu==2.21.0

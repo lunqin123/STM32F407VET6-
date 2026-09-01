@@ -1,0 +1,39 @@
+# 构建产物
+build/
+*.elf
+*.bin
+*.hex
+*.o
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 数据集与模型权重（体积大，不要进 git）
+*.mp4
+*.parquet
+*.pt
+*.pth
+*.safetensors
+*.gguf
+*.tflite
+*.onnx
+*.engine
+*.plan
+*.ncnn.param
+*.ncnn.bin
+*.gguf-split
+models/
+outputs/
+data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

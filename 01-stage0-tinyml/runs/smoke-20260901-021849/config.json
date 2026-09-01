@@ -1,0 +1,104 @@
+{
+  "audio": {
+    "sample_rate": 16000,
+    "clip_samples": 16000,
+    "n_fft": 640,
+    "hop_length": 320,
+    "n_mels": 40,
+    "n_mfcc": 10,
+    "center": false,
+    "per_sample_norm": true,
+    "n_frames": 49
+  },
+  "data": {
+    "dataset_url": "speech_commands_v0.02",
+    "dataset_version": "v0.02",
+    "n_silence_train": 4000,
+    "n_unknown_train": 8000,
+    "n_silence_eval": 800,
+    "n_unknown_eval": 1600,
+    "seed": 42,
+    "max_shift_ms": 100,
+    "noise_prob": 0.8,
+    "min_snr_db": 0.0,
+    "max_snr_db": 15.0,
+    "gain_prob": 0.5,
+    "min_gain": 0.6,
+    "max_gain": 1.3,
+    "spec_augment_prob": 0.8,
+    "freq_mask_param": 4,
+    "time_mask_param": 8,
+    "n_freq_masks": 2,
+    "n_time_masks": 2
+  },
+  "model": {
+    "width_multiplier": 1.0,
+    "stem_channels": 64,
+    "block_channels": [
+      64,
+      64,
+      64,
+      64
+    ],
+    "block_strides": [
+      [
+        2,
+        2
+      ],
+      [
+        1,
+        1
+      ],
+      [
+        2,
+        2
+      ],
+      [
+        1,
+        1
+      ]
+    ],
+    "dropout": 0.2,
+    "fold_norm_into_model": true
+  },
+  "train": {
+    "epochs": 30,
+    "batch_size": 128,
+    "num_workers": 4,
+    "lr": 0.003,
+    "weight_decay": 0.0001,
+    "label_smoothing": 0.05,
+    "warmup_epochs": 3,
+    "min_lr_ratio": 0.05,
+    "grad_clip": 5.0,
+    "early_stop_patience": 10,
+    "eval_every": 1,
+    "seed": 42
+  },
+  "quant": {
+    "n_calibration": 300,
+    "scheme": "static",
+    "per_channel": true,
+    "also_export_float": true
+  },
+  "labels": [
+    "yes",
+    "no",
+    "up",
+    "down",
+    "_silence_",
+    "_unknown_"
+  ],
+  "num_classes": 6,
+  "run": {
+    "name": "smoke-20260901-021849",
+    "epochs": 2,
+    "batch_size": 32,
+    "lr": 0.003,
+    "seed": 42,
+    "device": "cpu",
+    "smoke": true,
+    "num_params": 21830,
+    "torch_version": "2.13.0+cpu"
+  }
+}

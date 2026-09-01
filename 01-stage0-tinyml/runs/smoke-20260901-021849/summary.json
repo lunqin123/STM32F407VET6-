@@ -1,0 +1,9 @@
+{
+  "best_val_acc": 0.140625,
+  "best_epoch": 1,
+  "test_acc": 0.21875,
+  "test_loss": 1.7891438007354736,
+  "num_params": 21830,
+  "int8_size_kb_est": 21.3,
+  "run_dir": "D:\\STM32F407VET6\\01-stage0-tinyml\\runs\\smoke-20260901-021849"
+}
