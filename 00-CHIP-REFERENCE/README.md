@@ -78,6 +78,37 @@ CMSIS-SVD（System View Description）是 ARM 定义的 XML 标准，用机器�
 
 ---
 
+## 03-PINOUT/ — 引脚分配表（机器可读，非 PDF）
+
+SVD 只描述**寄存器地址**，故意不含任何封装/引脚信息；引脚定义在数据手册 (DocID022152) 的 Pinout / Pin-description 表。本目录把那张表结构化、机器可读化，专门回答"某个外设信号在哪些引脚上 / 某个引脚能接什么外设"。
+
+来源 (GitHub, 官方权威)：
+- **stm32duino / Arduino_Core_STM32** → `variants/STM32F4xx/F407V(E-G)T_F417V(E-G)T/PeripheralPins.c`
+- 该文件由 ST 的 CubeMX 数据库 (DB 6.0.180) 自动生成，覆盖 F407V(E-G)Tx / F417V(E-G)Tx（F407VET6 属于此族，LQFP100）
+
+文件清单：
+
+| 文件 | 作用 |
+| --- | --- |
+| `STM32F407VET6_PeripheralPins.c` | **权威机器可读源**：`WEAK const PinMap` 数组，逐引脚列出可接的外设 + GPIO 复用功能编号 (AF)。可直接 `grep` 查询 |
+| `STM32F407VET6_pinout.md` | 人读版速查表：ADC / USART / SPI / I2C / CAN / TIM-PWM 的引脚与 AF 汇总 |
+| `pins.csv` | 由 `.c` 解析出的 `pin,peripheral,signal,af` 表格，可被脚本/表格直接加载（239 行） |
+| `parse_pins.py` | 解析 `.c` → `pins.csv` 的脚本；`python parse_pins.py PA_11` 可即查某引脚能接的外设 |
+
+查询示例：
+
+```bash
+python parse_pins.py PA_11
+# TIM1  TIM1_CH4     AF1
+# USART1             AF7
+# CAN1               AF9
+# USB_OTG_FS USB_OTG_FS_DM  AF10
+```
+
+> 注意：此文件是 2026-09-02 通过 WebFetch 读取 raw GitHub 链接逐字转录所得（沙箱 Bash 出站网络被禁，无法 curl 原始字节）。如需字节级原始文件，浏览器/ git 直接打开上面 Raw URL 即可，内容一致。
+
+---
+
 ## 备注
 
 原仓库中另外两类文件已在清空时移除，原因如下：
