@@ -15,10 +15,10 @@
 
 ### `Wire.begin()`
 - 作用：初始化 I2C 主机（默认 100kHz）
-- 示例：
+- 示例（顺序不能反，与 selftest.cpp 一致）：
 ```cpp
-Wire.setClock(400000);   // 可选：提到 400kHz 快速模式，读角度更快
 Wire.begin();
+Wire.setClock(400000);   // begin 之后才可提速到 400kHz 快速模式，读角度更快
 ```
 
 ### `Wire.beginTransmission(addr)` → `Wire.write(reg)` → `Wire.endTransmission()`

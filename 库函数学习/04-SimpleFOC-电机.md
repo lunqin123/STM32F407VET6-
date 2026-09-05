@@ -106,6 +106,9 @@ motor.initFOC();                          // 现在不再动轴，直接就绪
 BLDCMotor motor = BLDCMotor(7);
 BLDCDriver3PWM driver = BLDCDriver3PWM(PA8, PA9, PA10, PB0);
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
+Commander command = Commander(Serial);              // 串口命令解析器
+
+void doTarget(char* cmd) { command.scalar(&motor.target, cmd); }   // "T 5" → 设目标
 
 void setup() {
     Serial.begin(115200);
@@ -122,14 +125,14 @@ void setup() {
     motor.LPF_velocity.Tf = 0.01f;
     motor.init();
     motor.initFOC();
-    Serial.println("Ready. Send speed in rad/s:");
+    command.add('T', doTarget, "target rad/s");     // 注册命令
+    Serial.println("Ready. T<速度> 控制，如 T 5");
 }
 
 void loop() {
-    motor.loopFOC();
-    // 串口输入数字 → 按该速度转（SimpleFOC Commander）
-    motor.move(motor.target);
-    motor.command();   // 处理串口命令，可直接调 PID
+    motor.loopFOC();         // 电流环（自动拉取传感器，含开环模式）
+    motor.move(motor.target);// 按目标速度转
+    command.run();           // 处理串口命令（注意：2.3.4 没有 motor.command()）
 }
 ```
 - 验收顺序：电压模式微动 → 速度模式 ±5 rad/s → 位置模式 0↔180° → 8 档棘轮（社区公式见 06 文件）

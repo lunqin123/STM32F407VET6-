@@ -28,7 +28,7 @@ MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 
 > 所有 getter 返回的是**上次 update() 缓存的值**，不读芯片！
 
-- `motor.loopFOC()` 每圈会自动调 `sensor.update()` → **含电机的固件不用手动调**
+- `motor.loopFOC()` 第一行就调 `sensor->update()` → **含电机的固件不用手动调**。源码（BLDCMotor.cpp）确认：**开环模式也会更新传感器**（官方注释：防止用户中途切模式丢失多圈计数）
 - **不含 loopFOC 的固件（纯传感器应用，如 knob、角度面板）必须每帧自己调**：
 ```cpp
 void loop() {
