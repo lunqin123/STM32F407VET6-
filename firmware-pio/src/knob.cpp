@@ -41,7 +41,11 @@
 /* ★ 熄屏实现 = 推一帧全黑，而不是 u8g2.setPowerSave(1)。
  *   setPowerSave 的 display-off 命令后 I2C 总线可能被 SSD1306 卡死，
  *   同总线的 AS5600 读数随之冻结 → 转轴唤醒永远检测不到。
- *   全黑帧视觉等同关屏（像素不亮=防烧屏），且总线保持活动。 */
+ *   全黑帧视觉等同关屏（像素不亮=防烧屏），且总线保持活动。
+ * ★ 兜底：那"一帧"偶尔会传输失败（与 AS5600 共总线，偶发 NAK/截断，
+ *   U8g2 不会重试）→ 屏幕留在旧画面上且再无人管。
+ *   所以熄屏期间每 1s 重推一次全黑帧（1KB@400kHz ≈ 25ms，开销可忽略），
+ *   任何一次成功即恢复黑屏；开屏瞬间照常先重画正常内容，无可见闪烁。 */
 bool     screen_on  = true;
 uint32_t last_motion = 0;         // 上次检测到转动的时刻
 uint32_t last_oled   = 0;
@@ -50,6 +54,12 @@ uint32_t last_motion_check = 0;
 
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+
+void pushBlackFrame()
+{
+    u8g2.clearBuffer();
+    u8g2.sendBuffer();
+}
 
 float last_raw = 0.0f;
 /* ★ 必须用浮点累加器：100Hz 下慢转时每帧增量 < 0.5 单位，
@@ -124,10 +134,7 @@ void loop()
         char c = toupper(Serial.read());
         if (c == 'P') {
             screen_on = !screen_on;
-            if (!screen_on) {                         // 熄屏 = 推一帧全黑
-                u8g2.clearBuffer();
-                u8g2.sendBuffer();
-            }
+            if (!screen_on) pushBlackFrame();         // 熄屏 = 推一帧全黑
             last_oled = 0;                            // 开屏后立即重画一帧
             Serial.println(screen_on ? "OLED ON" : "OLED OFF");
         }
@@ -136,9 +143,17 @@ void loop()
     /* --- 超时熄屏 --- */
     if (screen_on && millis() - last_motion > SCREEN_TIMEOUT_MS) {
         screen_on = false;
-        u8g2.clearBuffer();                           // 推一帧全黑
-        u8g2.sendBuffer();
+        pushBlackFrame();
+        last_oled = millis();                         // 兜底重推从此刻起计时
         Serial.println("OLED sleep (10s idle)");      // 顺带防烧屏
+    }
+
+    /* ★ 兜底：熄屏期间每 1s 重推一次全黑帧。
+     *   首帧传输偶发失败（共总线 NAK）时由后续重推自动纠正；
+     *   成功的推屏在黑色内容上重复也是黑屏，无副作用。 */
+    if (!screen_on && millis() - last_oled > 1000) {
+        pushBlackFrame();
+        last_oled = millis();
     }
 
     /* --- 到达边界时 LED 亮，作为最朴素的"提示器" --- */
@@ -156,7 +171,7 @@ void loop()
         last_oled = millis();
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_6x12_tf);
-        u8g2.drawStr(12, 24, "SMART KNOB");
+        u8g2.drawStr(0, 12, "SMART KNOB");
 
         u8g2.setFont(u8g2_font_logisoso28_tn);        // 28px 数字字体
         char buf[8];
