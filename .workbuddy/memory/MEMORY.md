@@ -41,6 +41,7 @@
 - pio 全路径 `/c/Users/16689/.platformio/penv/Scripts/pio.exe`
 - 沙箱 SAFE_DELETE 拦截 `.platformio` 锁文件批量删除 → pio 装库失败（仅噪音，不影响编译）
 - **编译报 `SHFileOperationW 失败: 0x2` 的正解**：`rm -rf .pio/build/<env>`（只删单个环境目录，勿删整个 .pio）+ `dangerouslyDisableSandbox: true` + 前台运行
+- **★ platformio.ini 禁用 `build_cache_dir`**（2026-09-06 实测）：SCons CacheDir 初始化要创建+删除自己的锁文件，沙箱删除保护拦截 os.unlink → 所有环境编译开始前直接 FAILED（错误栈在 env.CacheDir）。已回滚，platformio.ini 留有注释。跨环境编译缓存与本机沙箱不兼容，勿再启用
 - PowerShell 的 `Remove-Item -Recurse -Force` **无效**（静默失败），必须用 Bash `rm -rf`
 - 全量重编耗时约 150s → timeout 需 ≥ 300000，否则被 SIGTERM；后台任务不获越权批准
 - 过滤噪音：`pio run 2>&1 | grep -v "safe-delete" | tail -30`

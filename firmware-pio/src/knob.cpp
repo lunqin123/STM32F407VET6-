@@ -156,7 +156,7 @@ void loop()
         last_oled = millis();
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_6x12_tf);
-        u8g2.drawStr(0, 12, "SMART KNOB  (no 12V)");
+        u8g2.drawStr(12, 24, "SMART KNOB");
 
         u8g2.setFont(u8g2_font_logisoso28_tn);        // 28px 数字字体
         char buf[8];
