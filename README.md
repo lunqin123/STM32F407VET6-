@@ -16,6 +16,7 @@ STM32F407VET6/
 │
 ├── firmware-pio/            现役固件（PlatformIO，见下方环境表）
 ├── vision/                  PC 端视觉追踪脚本（OpenCV → 串口）
+├── 库函数学习/               ★ 库函数字典（Arduino/Wire/SimpleFOC/U8g2 逐个函数+示例+坑）
 ├── 00-CHIP-REFERENCE/       芯片权威资料（SVD 中文版 / HAL 手册 / 引脚表）
 │
 ├── 01-stage0-tinyml/        【旧路线遗留，勿动】venv 内是绝对路径

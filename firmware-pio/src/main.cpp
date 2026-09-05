@@ -15,17 +15,9 @@
  *         很多网贴写成 PB6=SDA/PB7=SCL（UNO 的习惯），在 F407 上是反的，接反不亮。
  *
  * 【硬件】
- *   BLDC 电机 + 三相驱动板（推荐：Makerbase MKS SimpleFOC Shield V2.0.4，L6234 驱动级）
+ *   BLDC 电机 + 三相驱动板（L6234 模块 / DRV8302 / SimpleFOC Shield）
  *   SSD1306 0.96" 128x64 I2C OLED（4 针：VCC GND SCL SDA，地址 0x3C）
  *   开环模式【不需要编码器】，先把电机转起来；闭环下一步再加
- *
- *   ⚠️ 关于 MKS SimpleFOC Shield V2.0.4（已核实为「驱动级」，非自带 MCU 的控制器）：
- *     - 驱动芯片 L6234，3 路 PWM 输入由外部 MCU（本板 F407）提供 → SimpleFOC 兼容 ✅
- *     - 供电 12–35V；本电机额定 12V，**务必用 12V 电源**，别上 35V
- *     - 自带 INA240 电流采样 + 编码器 I2C 接口 → 以后做力矩环/接 AS5600 很方便
- *     - 注意别买成「MKS ESP32 FOC」（那款自带 ESP32 MCU，会跳过 F407，不是我们要的）
- *     - 板子 PWM 输入在 Arduino 排针上（SimpleFOC Shield v2 默认 IN1=D9/IN2=D5/D3 或 D6、EN=D8，
- *       具体以你板子丝印/0R 跳线为准）。F407 PA8/9/10 → 三个 PWM 输入，PB0 → EN。
  *
  * 【安全】VOLTAGE_LIMIT 起步务必设小（2V 左右），确认转向正常后再逐步提高
  * ============================================================ */
@@ -40,8 +32,6 @@
 #define PIN_UH           PA8      // U 相上桥 → TIM1_CH1
 #define PIN_VH           PA9      // V 相上桥 → TIM1_CH2
 #define PIN_WH           PA10     // W 相上桥 → TIM1_CH3
-#define PIN_EN           PB0      // 驱动板使能脚 → MKS Shield 的 EN 引脚（D8 默认）
-                                 // 若你的板子 EN 已用 0R 电阻拉高，这脚接不接都行；接上更稳
 #define LED_PIN          PC13     // 板载 LED（低电平点亮）
 
 #define OLED_SDA         PB7      // ★ 见文件头说明：F407 的 Wire 默认 SDA 是 PB7
@@ -54,7 +44,7 @@
 
 /* ---------- 2. 对象 ---------- */
 BLDCMotor       motor   = BLDCMotor(POLE_PAIRS);
-BLDCDriver3PWM  driver  = BLDCDriver3PWM(PIN_UH, PIN_VH, PIN_WH, PIN_EN);
+BLDCDriver3PWM  driver  = BLDCDriver3PWM(PIN_UH, PIN_VH, PIN_WH);
 
 // 硬件 I2C / 全缓冲（1KB RAM）/ 无复位脚。买成 SH1106 1.3" 就把这行换成
 // U8G2_SH1106_128X64_NONAME_F_HW_I2C，其余代码不用动——这是选 U8g2 的好处。
@@ -129,7 +119,6 @@ void setup()
     /* --- 驱动板配置 --- */
     driver.voltage_power_supply = SUPPLY_VOLTAGE;
     Serial.println(driver.init() ? "驱动板初始化 OK" : "驱动板初始化失败");
-    driver.enable();                    // 拉高 EN 脚，驱动级才开始输出三相（MKS Shield 必需）
     motor.linkDriver(&driver);
 
     /* 控制模式：开环速度 —— 不需要编码器，靠电压"硬拖"电机转 */
@@ -162,6 +151,6 @@ void loop()
     static uint32_t last_led = 0;
     if (millis() - last_led > 500) {
         last_led = millis();
-        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+          digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
 }

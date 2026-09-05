@@ -37,7 +37,7 @@
 #define MOTION_WINDOW_MS  100UL   // 运动检测窗口
 /* 窗口内累计 |Δ角| 超过此值即算"在动"。0.01rad(0.57°)/100ms = 5.7°/s，
  * 慢转也能唤醒；AS5600 随机噪声正负相消约 0.3°，不会误触发。 */
-#define MOTION_ACCUM      0.01f
+#define MOTION_ACCUM      0.02f
 /* ★ 熄屏实现 = 推一帧全黑，而不是 u8g2.setPowerSave(1)。
  *   setPowerSave 的 display-off 命令后 I2C 总线可能被 SSD1306 卡死，
  *   同总线的 AS5600 读数随之冻结 → 转轴唤醒永远检测不到。
