@@ -32,6 +32,7 @@
 #define PIN_UH           PA8      // U 相上桥 → TIM1_CH1
 #define PIN_VH           PA9      // V 相上桥 → TIM1_CH2
 #define PIN_WH           PA10     // W 相上桥 → TIM1_CH3
+#define PIN_EN           PB0      // ★ Shield V3.2：DRV8313 的 Enable，不拉高不输出
 #define LED_PIN          PC13     // 板载 LED（低电平点亮）
 
 #define OLED_SDA         PB7      // ★ 见文件头说明：F407 的 Wire 默认 SDA 是 PB7
@@ -44,7 +45,7 @@
 
 /* ---------- 2. 对象 ---------- */
 BLDCMotor       motor   = BLDCMotor(POLE_PAIRS);
-BLDCDriver3PWM  driver  = BLDCDriver3PWM(PIN_UH, PIN_VH, PIN_WH);
+BLDCDriver3PWM  driver  = BLDCDriver3PWM(PIN_UH, PIN_VH, PIN_WH, PIN_EN);
 
 // 硬件 I2C / 全缓冲（1KB RAM）/ 无复位脚。买成 SH1106 1.3" 就把这行换成
 // U8G2_SH1106_128X64_NONAME_F_HW_I2C，其余代码不用动——这是选 U8g2 的好处。
