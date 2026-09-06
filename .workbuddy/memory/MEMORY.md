@@ -55,6 +55,10 @@
 - **★★ STM32 USB CDC 必须 `ser.setDTR(True)`**：DTR 为低时固件不发数据，表现为"COM 口正常枚举、TX 成功、收到 0 字节"。F407 的 CDC 是 **VID:PID = 0483:5740**。USB CDC 波特率虚设，零字节不要怀疑波特率。
 - **自检实机结果（2026-09-04 首次）**：I2C 扫到 `0x36 AS5600` + `0x3C OLED` 共 2 个设备；OLED 输出正常；LED 闪 5 次。→ ST-Link 链路、F407 供电、PB6/PB7 I2C 全部正确。
 
+**★ 烧录铁律（2026-09-06 实测）：12V 开着烧录必失败——PWM 开关噪声毁 SWD（报 "Failed to write memory"/verify 随机错位），烧录前必须关电源输出。OpenOCD 反复失败时换 CubeProgrammer CLI：`STM32_Programmer_CLI.exe -c port=SWD -d firmware.elf -v -rst`（官方驱动栈，实测可靠）；远程复位 `-c port=SWD -rst` 可配合后台 serial_capture 无人值守抓启动横幅。**
+
+**★ OLED 与电机控制循环（2026-09-06 确诊）：全帧 sendBuffer 1KB 阻塞 ~25-30ms，10Hz 定时刷新 = 每秒冻结 10 次 = 电机顿挫（闭环更敏感）。解法两级：main.cpp 事件驱动（参数变才画）；closedloop.cpp 两段式（静态区事件驱动 + 动态区 updateDisplayArea 局部发 256B/4Hz）。任何含 move()/loopFOC() 的主循环禁止周期性全帧刷新。**
+
 **规划**：P1 单轴视觉追踪(PC+摄像头) → P2 两轴(第2个C2208+支架) → P3 OpenMV/K210 边缘化视觉。
 **学习路线（2026-09-03 制定）**：详见 `D:\STM32F407VET6\学习路线图.md`——6阶段（控制理论补课→P1跑通→FOC深化→ROS2+Linux副技能→LeRobot具身智能→两轴+边缘化），每周10-15h，含已核实的B站资源（江协PID BV1G9zdYQEr3、灯哥开源SimpleFOC、鱼香ROS BV19U4y1n7CQ、赵虚左 BV1VB4y137ys、DR_CAN space 230105574）与简历里程碑表。纪律：动手:看视频≥1:1，每阶段产出可见物。
 **电源结论（2026-09-04 反接事故后修正）**：原"12V 适配器方案"作废。改用**带限流(CC)的可调直流电源 3-24V / 0-5A**，核心价值是预设限流（如 0.5A）防止再次烧毁。纯调电压无 CC 的便宜货无保护价值。用户已确认采购此规格。
