@@ -1,5 +1,9 @@
 # 05 U8g2 — OLED 绘图（SSD1306 128×64）
 
+> **★ 本固件项目已封装 `lib/Screen` 公共显示层**（两段式刷新 + 息屏兜底统一解决），
+> **新固件一律通过它接 OLED，不要直接手写 U8g2 调度**——本文件保留作为 U8g2 原生 API
+> 参考 + 原理说明。接入方法见 `firmware-pio/lib/Screen/src/Screen.h` 头注释（约 10 行）。
+
 > 类定义：`lib/U8g2/src/U8g2lib.h`（本地可查）
 > 用法固定三步：clearBuffer → 画 → sendBuffer。所有坐标以左上角为原点。
 
