@@ -1,0 +1,9 @@
+{
+  "name": "Screen",
+  "version": "1.0.0",
+  "description": "OLED 公共显示层：两段式刷新（静态事件驱动+动态 tile 局部重发）+ 黑帧息屏（含兜底重推）+ 活动唤醒。解决全帧 sendBuffer 阻塞电机控制循环、setPowerSave 冻结 I2C 总线两大实盘问题。",
+  "authors": [{ "name": "STM32F407VET6 learning project" }],
+  "frameworks": "arduino",
+  "platforms": "ststm32",
+  "dependencies": [{ "name": "U8g2" }]
+}

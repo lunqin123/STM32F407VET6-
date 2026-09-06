@@ -26,6 +26,7 @@
 #include <Wire.h>
 #include <SimpleFOC.h>
 #include <U8g2lib.h>
+#include <Screen.h>
 
 /* ---------- 1. 硬件参数区 ---------- */
 #define POLE_PAIRS     7        // C2208-100T = 7 极对（与 main.cpp 一致）
@@ -39,19 +40,13 @@
 
 #define SUPPLY_VOLTAGE 12.0f
 #define VOLTAGE_LIMIT  2.0f     // ★ 起步限压，防过流；用 L 命令调大
-/* ★ OLED 两段式刷新（2026-09-06，根治刷屏顿挫）：
- *   全帧 1KB 阻塞 ~25ms，闭环速度环对测量间隙极敏感（10Hz 曾致明显顿挫）。
- *   - 静态区（标题/模式/目标）：事件驱动，仅参数变化时全帧重画一次
- *   - 动态区（实测角度行）：每 250ms 只重发底部 2 个 tile 行（256B ≈ 6ms）
- *   闭环下阻塞占比 <2%，肉眼无感。原理见 库函数学习/05 坑区。 */
-#define OLED_LIVE_MS   250
+/* OLED 刷新由 lib/Screen 公共层接管（两段式 + 息屏），本文件不再直接操作 U8g2 */
 
 /* ---------- 2. 对象 ---------- */
 BLDCMotor        motor  = BLDCMotor(POLE_PAIRS);
 BLDCDriver3PWM   driver = BLDCDriver3PWM(PIN_UH, PIN_VH, PIN_WH, PIN_EN);
 // AS5600：I2C 默认地址 0x36，12bit（SimpleFOC 的 AS5600_I2C 宏已含这些参数）
 MagneticSensorI2C sensor = MagneticSensorI2C(AS5600_I2C);
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 bool oled_ok = false;
 
@@ -68,67 +63,35 @@ void doMode  (char *cmd) {
     Serial.println(m == 0 ? "torque(力矩)" : (m == 2 ? "angle(位置)" : "velocity(速度)"));
 }
 
-/* ---------- 4. 屏幕绘制 ---------- */
-/* ---------- 3.5 OLED 两段式刷新 ---------- */
-static float   last_drawn_target = -1e9f;
-static float   last_drawn_ulim   = -1e9f;
-static uint8_t last_drawn_mode   = 255;
-
-static bool oledNeedsFullRedraw()
+/* ---------- 4. 屏幕绘制（统一走 lib/Screen 公共层，本文件只写绘制回调） ---------- */
+/* 带划分：tile 行 0-1 / 2-3 / 4-5 / 6-7（每带 16px，文字基线 12/28/44/60） */
+static void drawTitle(U8G2 &u)   // 静态：标题
 {
-    return motor.target        != last_drawn_target
-        || motor.voltage_limit != last_drawn_ulim
-        || (uint8_t)motor.controller != last_drawn_mode;
+    u.drawStr(0, 12, "F407 FOC closed");
+    u.drawHLine(0, 14, 128);
 }
-
-/* 静态区全帧重画：仅在 T / L / M 命令改变参数时执行（一次性 ~25ms） */
-static void drawOLEDStatic()
+static void drawParam(U8G2 &u)   // 静态：模式 + 目标
 {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tf);
-
-    u8g2.drawStr(0, 11, "F407 FOC closed");
-    u8g2.drawHLine(0, 14, 128);
-
+    char buf[24];
     const char *mode = (motor.controller == MotionControlType::angle)  ? "POS"
-                      : (motor.controller == MotionControlType::torque) ? "TRQ"
-                      : "VEL";
-    char buf[24];
-    snprintf(buf, sizeof(buf), "mode %s", mode);
-    u8g2.drawStr(0, 26, buf);
-
-    // 目标：速度环显示 rad/s，位置环显示 弧度 / 圈数
-    if (motor.controller == MotionControlType::angle) {
-        snprintf(buf, sizeof(buf), "Tgt %6.2f rad", motor.target);
-        u8g2.drawStr(0, 38, buf);
-        snprintf(buf, sizeof(buf), "    %6.2f rev", motor.target / (2.0f * PI));
-    } else {
-        snprintf(buf, sizeof(buf), "Tgt %6.2f rad/s", motor.target);
-        u8g2.drawStr(0, 38, buf);
-        snprintf(buf, sizeof(buf), "    %6.1f rpm", motor.target * 60.0f / (2.0f * PI));
-    }
-    u8g2.drawStr(0, 50, buf);
-
-    // 动态区内容也要画进缓冲（全帧发送时保证屏幕一致）
-    snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
-    u8g2.drawStr(0, 62, buf);
-
-    u8g2.sendBuffer();
-
-    last_drawn_target = motor.target;
-    last_drawn_ulim   = motor.voltage_limit;
-    last_drawn_mode   = (uint8_t)motor.controller;
+                      : (motor.controller == MotionControlType::torque) ? "TRQ" : "VEL";
+    snprintf(buf, sizeof(buf), "%s  T %.2f", mode, motor.target);
+    u.drawStr(0, 28, buf);
 }
-
-/* 动态区局部重发：只更新底部 2 个 tile 行（Ang 行），~256B ≈ 6ms */
-static void drawOLEDLive()
+static void drawAux(U8G2 &u)     // 静态：转速/圈数换算 + 限压
 {
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_6x12_tf);
+    char buf[24];
+    if (motor.controller == MotionControlType::angle)
+        snprintf(buf, sizeof(buf), "%5.2f rev  U%.1fV", motor.target / (2.0f * PI), motor.voltage_limit);
+    else
+        snprintf(buf, sizeof(buf), "%5.1f rpm  U%.1fV", motor.target * 60.0f / (2.0f * PI), motor.voltage_limit);
+    u.drawStr(0, 44, buf);
+}
+static void drawAngle(U8G2 &u)   // 动态：实测角度（AS5600 真值，局部重发）
+{
     char buf[24];
     snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
-    u8g2.drawStr(0, 62, buf);
-    u8g2.updateDisplayArea(0, 6, 16, 2);   // tile(8x8px)：x=0 宽16 tile，y=6 高2 tile
+    u.drawStr(0, 60, buf);
 }
 
 /* ---------- 5. 初始化 ---------- */
@@ -148,8 +111,15 @@ void setup()
     Wire.begin();
     Wire.setClock(400000);
 
-    oled_ok = u8g2.begin();
+    oled_ok = oled::begin();
     Serial.println(oled_ok ? "OLED OK" : "OLED 未找到（不影响闭环）");
+    if (oled_ok) {
+        oled::addBand(0, 2, false, drawTitle);   // 静态：标题
+        oled::addBand(2, 2, false, drawParam);   // 静态：模式+目标
+        oled::addBand(4, 2, false, drawAux);     // 静态：换算+限压
+        oled::addBand(6, 2, true,  drawAngle);   // 动态：实测角度（局部重发）
+        oled::setSleepTimeout(30000);            // 30s 无角度变化/命令自动息屏
+    }
 
     /* 编码器 */
     sensor.init();
@@ -191,16 +161,27 @@ void loop()
     motor.move();              // 执行运动控制（用 motor.target）
     command.run();            // 处理串口命令
 
-    /* OLED 两段式：参数变了全帧重画；平时只局部刷 Ang 行 */
-    static uint32_t last_oled = 0;
-    if (oled_ok) {
-        if (oledNeedsFullRedraw()) {
-            drawOLEDStatic();
-        } else if (millis() - last_oled > OLED_LIVE_MS) {
-            last_oled = millis();
-            drawOLEDLive();
-        }
+    /* OLED（lib/Screen 公共层）：参数变化标脏静态带；角度变了标脏动态带。
+     * Screen 内部负责事件驱动全帧 + tile 局部重发 + 息屏/兜底，循环零阻塞设计 */
+    static float   last_tgt  = -1e9f;
+    static float   last_ulim = -1e9f;
+    static uint8_t last_mode = 255;
+    static char    last_ang[24] = "";
+    if (motor.target != last_tgt || motor.voltage_limit != last_ulim
+        || (uint8_t)motor.controller != last_mode) {
+        oled::invalidate(1);
+        oled::invalidate(2);
+        last_tgt  = motor.target;
+        last_ulim = motor.voltage_limit;
+        last_mode = (uint8_t)motor.controller;
     }
+    char abuf[24];
+    snprintf(abuf, sizeof(abuf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
+    if (strcmp(abuf, last_ang) != 0) {
+        oled::invalidate(3);
+        strcpy(last_ang, abuf);
+    }
+    oled::tick();
 
     static uint32_t last_led = 0;
     if (millis() - last_led > 500) {
