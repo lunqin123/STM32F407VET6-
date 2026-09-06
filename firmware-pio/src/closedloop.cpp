@@ -39,7 +39,12 @@
 
 #define SUPPLY_VOLTAGE 12.0f
 #define VOLTAGE_LIMIT  2.0f     // ★ 起步限压，防过流；用 L 命令调大
-#define OLED_REFRESH_MS 100
+/* ★ OLED 两段式刷新（2026-09-06，根治刷屏顿挫）：
+ *   全帧 1KB 阻塞 ~25ms，闭环速度环对测量间隙极敏感（10Hz 曾致明显顿挫）。
+ *   - 静态区（标题/模式/目标）：事件驱动，仅参数变化时全帧重画一次
+ *   - 动态区（实测角度行）：每 250ms 只重发底部 2 个 tile 行（256B ≈ 6ms）
+ *   闭环下阻塞占比 <2%，肉眼无感。原理见 库函数学习/05 坑区。 */
+#define OLED_LIVE_MS   250
 
 /* ---------- 2. 对象 ---------- */
 BLDCMotor        motor  = BLDCMotor(POLE_PAIRS);
@@ -64,7 +69,20 @@ void doMode  (char *cmd) {
 }
 
 /* ---------- 4. 屏幕绘制 ---------- */
-static void drawOLED()
+/* ---------- 3.5 OLED 两段式刷新 ---------- */
+static float   last_drawn_target = -1e9f;
+static float   last_drawn_ulim   = -1e9f;
+static uint8_t last_drawn_mode   = 255;
+
+static bool oledNeedsFullRedraw()
+{
+    return motor.target        != last_drawn_target
+        || motor.voltage_limit != last_drawn_ulim
+        || (uint8_t)motor.controller != last_drawn_mode;
+}
+
+/* 静态区全帧重画：仅在 T / L / M 命令改变参数时执行（一次性 ~25ms） */
+static void drawOLEDStatic()
 {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x12_tf);
@@ -77,25 +95,40 @@ static void drawOLED()
                       : "VEL";
     char buf[24];
     snprintf(buf, sizeof(buf), "mode %s", mode);
-    u8g2.drawStr(0, 28, buf);
+    u8g2.drawStr(0, 26, buf);
 
     // 目标：速度环显示 rad/s，位置环显示 弧度 / 圈数
     if (motor.controller == MotionControlType::angle) {
         snprintf(buf, sizeof(buf), "Tgt %6.2f rad", motor.target);
-        u8g2.drawStr(0, 40, buf);
+        u8g2.drawStr(0, 38, buf);
         snprintf(buf, sizeof(buf), "    %6.2f rev", motor.target / (2.0f * PI));
     } else {
         snprintf(buf, sizeof(buf), "Tgt %6.2f rad/s", motor.target);
-        u8g2.drawStr(0, 40, buf);
+        u8g2.drawStr(0, 38, buf);
         snprintf(buf, sizeof(buf), "    %6.1f rpm", motor.target * 60.0f / (2.0f * PI));
     }
-    u8g2.drawStr(0, 52, buf);
+    u8g2.drawStr(0, 50, buf);
 
-    // 实测值（来自 AS5600，闭环才是真值；屏幕只放角度，速度看串口更直观）
+    // 动态区内容也要画进缓冲（全帧发送时保证屏幕一致）
     snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
-    u8g2.drawStr(0, 63, buf);
+    u8g2.drawStr(0, 62, buf);
 
     u8g2.sendBuffer();
+
+    last_drawn_target = motor.target;
+    last_drawn_ulim   = motor.voltage_limit;
+    last_drawn_mode   = (uint8_t)motor.controller;
+}
+
+/* 动态区局部重发：只更新底部 2 个 tile 行（Ang 行），~256B ≈ 6ms */
+static void drawOLEDLive()
+{
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x12_tf);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
+    u8g2.drawStr(0, 62, buf);
+    u8g2.updateDisplayArea(0, 6, 16, 2);   // tile(8x8px)：x=0 宽16 tile，y=6 高2 tile
 }
 
 /* ---------- 5. 初始化 ---------- */
@@ -158,10 +191,15 @@ void loop()
     motor.move();              // 执行运动控制（用 motor.target）
     command.run();            // 处理串口命令
 
+    /* OLED 两段式：参数变了全帧重画；平时只局部刷 Ang 行 */
     static uint32_t last_oled = 0;
-    if (oled_ok && millis() - last_oled > OLED_REFRESH_MS) {
-        last_oled = millis();
-        drawOLED();
+    if (oled_ok) {
+        if (oledNeedsFullRedraw()) {
+            drawOLEDStatic();
+        } else if (millis() - last_oled > OLED_LIVE_MS) {
+            last_oled = millis();
+            drawOLEDLive();
+        }
     }
 
     static uint32_t last_led = 0;
