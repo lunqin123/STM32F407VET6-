@@ -41,7 +41,7 @@
 #define SUPPLY_VOLTAGE   12.0f    // 驱动板供电电压（按你的电源改）
 #define VOLTAGE_LIMIT    2.0f     // ★ 起步限压，防止过流烧电机/驱动板
 
-#define OLED_REFRESH_MS  100      // 屏幕刷新周期（10Hz）——不要再快，I2C 会拖慢控制环
+// （已弃用）刷新已改为事件驱动，见 drawOLED 处注释
 
 /* ---------- 2. 对象 ---------- */
 BLDCMotor       motor   = BLDCMotor(POLE_PAIRS);
@@ -63,7 +63,20 @@ void doLimit (char *cmd) {
 }
 
 /* ---------- 3. 屏幕绘制 ---------- */
-/* 全缓冲模式：先在内存里画，再一次 sendBuffer 推给屏幕，不会闪 */
+/* ★ 事件驱动刷新（不要改回定时刷新！）：
+ *   全缓冲帧 1KB @400kHz 要阻塞主循环 ~25-30ms。若 10Hz 定时刷新，
+ *   电机每秒被"冻结"10 次 → 开环转动肉眼可见地一顿一顿（2026-09-06 实测）。
+ *   改为只在 Tgt / Ulim 变化时画一次，平时循环里零 I2C 开销。
+ *   代价：去掉实时角度行（开环下它本来就只是内部积分值，非实测）。 */
+static float last_drawn_target = -1.0f;
+static float last_drawn_ulim   = -1.0f;
+
+static bool oledNeedsRedraw()
+{
+    return target_velocity != last_drawn_target
+        || motor.voltage_limit  != last_drawn_ulim;
+}
+
 static void drawOLED()
 {
     u8g2.clearBuffer();
@@ -76,18 +89,17 @@ static void drawOLED()
 
     // 目标转速（rad/s 换成 rpm 更直观）
     snprintf(buf, sizeof(buf), "Tgt %6.2f rad/s", target_velocity);
-    u8g2.drawStr(0, 28, buf);
+    u8g2.drawStr(0, 30, buf);
     snprintf(buf, sizeof(buf), "    %6.1f rpm", target_velocity * 60.0f / (2.0f * PI));
-    u8g2.drawStr(0, 40, buf);
-
-    // 开环下 motor.shaftAngle() 是「估算角度」，不是实测——闭环接上编码器后才是真值
-    snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
-    u8g2.drawStr(0, 52, buf);
+    u8g2.drawStr(0, 44, buf);
 
     snprintf(buf, sizeof(buf), "Ulim %.1fV", motor.voltage_limit);
     u8g2.drawStr(0, 63, buf);
 
     u8g2.sendBuffer();
+
+    last_drawn_target = target_velocity;
+    last_drawn_ulim   = motor.voltage_limit;
 }
 
 /* ---------- 4. 初始化 ---------- */
@@ -141,10 +153,8 @@ void loop()
     motor.move(target_velocity);   // 开环：函数内部自带时序控制
     command.run();                 // 处理串口命令（非阻塞）
 
-    /* OLED：10Hz 刷新，不阻塞电机控制 */
-    static uint32_t last_oled = 0;
-    if (oled_ok && millis() - last_oled > OLED_REFRESH_MS) {
-        last_oled = millis();
+    /* OLED：★ 仅参数变化时重画（事件驱动），转动期间零 I2C 阻塞 */
+    if (oled_ok && oledNeedsRedraw()) {
         drawOLED();
     }
 
