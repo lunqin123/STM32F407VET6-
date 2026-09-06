@@ -54,6 +54,9 @@ bool oled_ok = false;
 Commander command = Commander(Serial);
 void doTarget(char *cmd) { command.scalar(&motor.target, cmd); }
 void doLimit (char *cmd) { command.scalar(&motor.voltage_limit, cmd); }
+void doTf    (char *cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }   // F：速度滤波
+void doP     (char *cmd) { command.scalar(&motor.PID_velocity.P, cmd); }   // P：速度环比例
+void doI     (char *cmd) { command.scalar(&motor.PID_velocity.I, cmd); }   // I：速度环积分
 void doMode  (char *cmd) {
     int m = cmd ? atoi(cmd) : 1;
     if      (m == 0) motor.controller = MotionControlType::torque;
@@ -139,7 +142,7 @@ void setup()
     motor.PID_velocity.P = 0.2f;
     motor.PID_velocity.I = 20.0f;
     motor.PID_velocity.D = 0.0f;
-    motor.LPF_velocity.Tf = 0.01f;    // 速度低通滤波时间常数
+    motor.LPF_velocity.Tf = 0.03f;    // 速度低通滤波（低速量化噪声主滤波器，F 命令可调）
     // 位置环 P（位置环内部再套一层速度环）
     motor.P_angle.P = 20.0f;
     motor.controller = MotionControlType::velocity;
@@ -150,8 +153,11 @@ void setup()
     command.add('T', doTarget, "target (rad/s 或 rad)");
     command.add('L', doLimit,  "voltage limit (V)");
     command.add('M', doMode,   "mode 0=trq 1=vel 2=pos");
+    command.add('F', doTf,     "velocity LPF Tf (0.01-0.1)");
+    command.add('P', doP,      "vel PID P");
+    command.add('I', doI,      "vel PID I");
 
-    Serial.println("就绪。T<速度> 调速；M2 切位置环后 T<弧度> 定位；L<电压> 调上限");
+    Serial.println("就绪。T<速度> M<模式> L<限压> F<滤波> P/I<PID>");
 }
 
 /* ---------- 6. 主循环 ---------- */
