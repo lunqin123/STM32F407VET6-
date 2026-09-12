@@ -20,8 +20,13 @@
  *   L<数字>  调电压上限（起步 2V，确认不抖再调大）
  *   F<数字>  速度低通 Tf（低速量化噪声主滤波器）
  *   P/I<数字> 速度环 PID    A<数字> 位置环 P    V<数字> 速度上限(rad/s)
+ *   Z        体检快照：I2C 扫描 + 对齐状态 + 原始编码器角（排查"角度恒 0"）
  *   O<毫秒>  遥测周期（0=关闭，**默认关闭**）。开启后每周期输出一行：
- *              D,<ms>,<mode>,<target_rad>,<angle_rad>,<velocity_rad_s>
+ *              D,<ms>,<mode>,<target_rad>,<angle_rad>,<velocity_rad_s>,<raw_rad>
+ *            ★ 末段 <raw_rad> = 编码器**未经方向换算**的原始累计角。对齐失败时
+ *              motor.shaft_angle 会恒为 0（sensor_direction 仍为 UNKNOWN，乘完还是 0），
+ *              但 raw_rad 照常跟随真实轴位置变化 —— 它是判断"编码器到底有没有在
+ *              读数"的唯一可靠字段：用手转轴，raw 变 = 编码器好。
  *            供 tools/serial_bench.py 自动采数。最小 5ms（200Hz）。
  *
  * 【为什么遥测默认关闭】本文件是闭环控制固件，任何周期性串口输出都在
@@ -99,6 +104,71 @@ void doTel(char *cmd) {
     Serial.print(tel_ms);
     Serial.println(tel_ms ? " ms ON (D,ms,mode,tgt,ang,vel)" : " OFF");
 }
+
+/* ---------- 3c. 体检：把"为什么角度读不到"直接打到串口（避免瞎猜） ----------
+ * 背景（真踩过的坑）：FOC 对齐失败时 motor.shaft_angle 会**恒为 0**，症状和
+ * "编码器坏了"一模一样，肉眼无法区分。根因链：
+ *   alignSensor() 没测到转动 → 返回 0 → sensor_direction 仍 UNKNOWN(=0)
+ *   → shaftAngle() = 0 × sensor->getAngle() = 0（永远 0）
+ *   → 且 initFOC() 在失败分支里调了 disable()，驱动被关，电机也不会转
+ * 所以必须把"对齐状态"和"原始编码器角"分开暴露出来看。 */
+static bool focAligned() {
+    return (motor.sensor_direction != Direction::UNKNOWN) && _isset(motor.zero_electric_angle);
+}
+
+static const char *statusName(uint8_t s) {
+    switch (s) {
+        case 0x00: return "uninitialized";
+        case 0x01: return "initializing";
+        case 0x02: return "uncalibrated(仅开环可用)";
+        case 0x03: return "calibrating";
+        case 0x04: return "ready(闭环可用)";
+        case 0x08: return "error";
+        case 0x0E: return "CALIB_FAILED";
+        case 0x0F: return "INIT_FAILED";
+        default:   return "?";
+    }
+}
+
+static uint8_t scanI2C() {
+    uint8_t n = 0;
+    Serial.print("I2C 扫描:");
+    for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) {
+            Serial.print(" 0x"); Serial.print(a, HEX);
+            n++;
+        }
+    }
+    if (!n) Serial.print(" 无设备（查 PB6/PB7 接线与上拉）");
+    Serial.println();
+    return n;
+}
+
+/* 打印一次完整体检快照（上电自动调一次，之后可用 Z 命令随时复查） */
+static void printDiag() {
+    scanI2C();
+    Serial.print("sensor_direction  = "); Serial.print((int)motor.sensor_direction);
+    Serial.println(motor.sensor_direction == Direction::UNKNOWN ? "  (UNKNOWN: 未对齐)"
+                 : motor.sensor_direction == Direction::CW  ? "  (CW)"
+                                                            : "  (CCW)");
+    Serial.print("zero_electric_ang = ");
+    if (_isset(motor.zero_electric_angle)) Serial.println(motor.zero_electric_angle, 4);
+    else                                   Serial.println("NOT_SET");
+    Serial.print("motor_status      = 0x"); Serial.print((int)motor.motor_status, HEX);
+    Serial.print("  "); Serial.println(statusName((uint8_t)motor.motor_status));
+    Serial.print("driver enabled    = "); Serial.println(motor.enabled);
+    Serial.print("raw sensor angle  = "); Serial.println(sensor.getAngle(), 4);
+    Serial.print("shaft_angle       = "); Serial.println(motor.shaft_angle, 4);
+    if (focAligned()) {
+        Serial.println(">>> 体检通过：FOC 已对齐，闭环就绪");
+    } else {
+        Serial.println(">>> 体检未通过：FOC 未对齐 → shaft_angle 会恒为 0。");
+        Serial.println("    最常见原因：12V 未通电（电机无法被拉到电角度 0）→ 通电后按 RESET。");
+        Serial.println("    想在没有 12V 时验证编码器：用手缓慢转轴，看遥测 raw 字段是否跟着变。");
+    }
+}
+void doStatus(char *) { printDiag(); }
 
 /* ---------- 4. 屏幕绘制（统一走 lib/Screen 公共层，本文件只写绘制回调） ---------- */
 /* 带划分：tile 行 0-1 / 2-3 / 4-5 / 6-7（每带 16px，文字基线 12/28/44/60） */
@@ -183,7 +253,13 @@ void setup()
     motor.controller = MotionControlType::velocity;
 
     motor.init();
-    motor.initFOC();                  // ★ 电角度对齐：上电会轻微动一下，正常
+    /* ★ 上电自动对齐：会给一相通电把转子拉到电角度 0，电机会轻微动一下，正常。
+     *   若此刻 12V 没通，电机"拉不动"→ 对齐失败 → 之后角度读数恒为 0。
+     *   这不是固件 bug，是没动力；通电后按 RESET 即可重新对齐。 */
+    motor.initFOC();
+
+    Serial.println("--- 启动体检 ---");
+    printDiag();                      // 角度读不到时，先看这里，别猜
 
     command.add('T', doTarget, "target (rad/s 或 rad)");
     command.add('L', doLimit,  "voltage limit (V)");
@@ -193,9 +269,10 @@ void setup()
     command.add('I', doI,      "vel PID I");
     command.add('A', doAp,     "angle PID P");
     command.add('V', doVlim,   "velocity limit rad/s");
+    command.add('Z', doStatus, "diagnostic snapshot");
     command.add('O', doTel,    "telemetry period ms (0=off, >=5)");
 
-    Serial.println("就绪。T<目标> M<模式> L<限压> F<滤波> P/I<速度环PID> A<位置环P> V<速度上限> O<遥测ms>");
+    Serial.println("就绪。T<目标> M<模式> L<限压> F<滤波> P/I<速度环PID> A<位置环P> V<速度上限> Z<体检> O<遥测ms>");
 }
 
 /* ---------- 6. 主循环 ---------- */
@@ -220,9 +297,13 @@ void loop()
         if (now - tel_last >= tel_ms) {
             tel_last = now;
             static char tb[96];
-            int n = snprintf(tb, sizeof(tb), "D,%lu,%d,%.4f,%.4f,%.4f\n",
+            /* 第 7 段 raw = 编码器原始累计角（未乘 sensor_direction）：
+             * 对齐失败时 shaft_angle 恒 0，但 raw 仍随真实轴位置变化 —— 靠它
+             * 才能把"编码器坏"和"没通电没对齐"两件事分开。 */
+            int n = snprintf(tb, sizeof(tb), "D,%lu,%d,%.4f,%.4f,%.4f,%.4f\n",
                              (unsigned long)now, (int)motor.controller,
-                             motor.target, motor.shaft_angle, motor.shaft_velocity);
+                             motor.target, motor.shaft_angle, motor.shaft_velocity,
+                             sensor.getAngle());
             if (n > 0 && Serial.availableForWrite() >= n) {
                 Serial.write((const uint8_t *)tb, (size_t)n);
                 tel_sent++;

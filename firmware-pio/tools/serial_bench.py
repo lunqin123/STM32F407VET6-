@@ -36,6 +36,10 @@ F407 闭环调试台 —— 自动跑测试序列、采遥测、算指标、出�
   # 原始抓取（不跑序列，只采数）
   python serial_bench.py raw --duration 10
 
+  # 硬件体检：不用 12V，手转电机轴，判断编码器有没有在读数
+  # （角度恒 0 / 怀疑编码器坏时，第一步先跑这个）
+  python serial_bench.py check --port COM5
+
 【输出】tools/runs/<时间戳>_<测试>.csv 与 .svg，终端同时打印指标表。
 
 【关键设计说明】
@@ -59,7 +63,8 @@ except ImportError:
     sys.exit(1)
 
 
-Sample = namedtuple("Sample", "t_ms mode target angle vel")
+# raw = 编码器原始累计角（固件遥测第 7 段；旧版固件没有该字段 → None）
+Sample = namedtuple("Sample", "t_ms mode target angle vel raw", defaults=(None,))
 
 MODE_NAME = {0: "torque", 1: "velocity", 2: "angle"}
 RAD2DEG = 180.0 / math.pi
@@ -106,12 +111,14 @@ class Bench:
             return
         if line.startswith("D,"):
             parts = line.split(",")
-            if len(parts) != 6:
+            if len(parts) not in (6, 7):        # 6=旧固件；7=含 raw 的新固件
                 self.bad_lines += 1
                 return
             try:
+                raw = float(parts[6]) if len(parts) >= 7 else None
                 self.samples.append(Sample(int(parts[1]), int(parts[2]),
-                                           float(parts[3]), float(parts[4]), float(parts[5])))
+                                           float(parts[3]), float(parts[4]),
+                                           float(parts[5]), raw))
             except ValueError:
                 self.bad_lines += 1
             return
@@ -309,9 +316,11 @@ def write_csv(path, samples, meta):
     with open(path, "w", encoding="utf-8", newline="") as f:
         for k, v in meta.items():
             f.write(f"# {k}={v}\n")
-        f.write("t_ms,mode,target_rad,angle_rad,velocity_rad_s,angle_deg\n")
+        f.write("t_ms,mode,target_rad,angle_rad,velocity_rad_s,angle_deg,raw_rad\n")
         for s in samples:
-            f.write(f"{s.t_ms},{s.mode},{s.target:.6f},{s.angle:.6f},{s.vel:.6f},{s.angle * RAD2DEG:.4f}\n")
+            raw = "" if s.raw is None else f"{s.raw:.6f}"
+            f.write(f"{s.t_ms},{s.mode},{s.target:.6f},{s.angle:.6f},{s.vel:.6f},"
+                    f"{s.angle * RAD2DEG:.4f},{raw}\n")
 
 
 def _poly(points):
@@ -486,12 +495,62 @@ def save(bench, args, name, title, step_idx):
 # ============================================================
 # 子命令
 # ============================================================
+def raw_span(samples):
+    """返回 (带 raw 的样本数, 跨度rad)；无 raw 字段时跨度为 None。"""
+    rs = [s.raw for s in samples if s.raw is not None]
+    return len(rs), (max(rs) - min(rs)) if rs else None
+
+
 def cmd_raw(bench, args):
     bench.send(f"T{math.radians(args.start_deg):.4f}", settle=0.5)
     bench.clear()
     bench.pump(args.duration)
     print(f"\n[原始抓取] {len(bench.samples)} 样本，{bench.sample_rate():.1f} Hz")
+    n_raw, span = raw_span(bench.samples)
+    if span is not None:
+        print(f"  raw(编码器原始角) {n_raw} 条，跨度 {span * RAD2DEG:.1f}°")
     save(bench, args, "raw", "raw capture", None)
+
+
+def cmd_check(bench, args):
+    """硬件体检：把"编码器坏"和"没通电/没对齐"彻底分开。
+
+    ★ 这一步**不需要 12V**：切到力矩模式 + 目标 0（不给力，轴可自由转），
+      再用手缓慢转动转子轴，看遥测 raw 字段是否跟着变 ——
+        raw 明显变 → AS5600 与 I2C 正常，角度恒 0 的原因只剩"FOC 未对齐"
+        raw 不动   → 编码器侧问题（磁铁/接线/器件），继续查硬件
+    原理：raw = 编码器原始角，**不乘 sensor_direction**；对齐失败时
+    shaft_angle 恒 0，raw 却是真实值，所以它是唯一能独立验证编码器的字段。
+    """
+    bench.send("T0")                      # 力矩模式下 0 = 不给力，轴自由
+    bench.send("Z", settle=0.4)           # 让固件把体检快照打到串口
+    print(f"\n[体检] 请用手**缓慢转动转子轴**约 {args.duration:.0f} 秒"
+          f"（正反各转一点，别用蛮力）...")
+    bench.clear()
+    bench.pump(args.duration)
+
+    n_raw, span = raw_span(bench.samples)
+    print("\n=== 硬件体检结果 ===")
+    print(f"  遥测样本 {len(bench.samples)} 条，其中带 raw 字段 {n_raw} 条")
+    if n_raw == 0:
+        if bench.samples:
+            print("  ⚠ 遥测只有 6 段、没有 raw 字段 → 固件是旧版。重烧 closedloop 后再试。")
+        else:
+            print("  ✗ 没收到任何遥测 —— 先确认固件含 O 命令且已按 RESET")
+        return
+    span_deg = span * RAD2DEG
+    print(f"  raw 跨度 = {span_deg:.1f}°")
+    if span_deg > 5.0:
+        print("  ✓ 编码器在读数：转轴时 raw 明显变化 → AS5600 与 I2C 正常")
+        print("    → 若 motor.shaft_angle 仍恒为 0，唯一原因就是 FOC 未对齐")
+        print("      （绝大多数是 12V 未通电；通电后按 RESET，对齐成功即恢复）")
+    else:
+        print("  ✗ raw 几乎不动（<5°），三种可能：")
+        print("      1) 没真的转转子轴（转外壳/风叶不算）")
+        print("      2) AS5600 没读到：磁铁偏心或未装、I2C 断线"
+              "（看上面的 Z 快照里 I2C 扫描有无 0x36）")
+        print("      3) 编码器 / 磁铁损坏")
+    save(bench, args, "check", "hardware check / hand-turn encoder test", None)
 
 
 def cmd_step(bench, args):
@@ -680,6 +739,9 @@ def build_parser():
     p.add_argument("--duration", type=float, default=10.0)
     p.add_argument("--start-deg", type=float, default=0.0)
 
+    p = sub.add_parser("check", parents=[common], help="硬件体检：编码器是否在读数（可无 12V）")
+    p.add_argument("--duration", type=float, default=6.0, help="转轴采样时长 s")
+
     sub.add_parser("selftest", parents=[common], help="无硬件自检指标算法")
     return ap
 
@@ -709,7 +771,10 @@ def main():
         print(f"  [dev] {line}")
     bench.logs.clear()
 
-    mode = 2 if args.cmd == "step" else (1 if args.cmd in ("velstep", "hold") else None)
+    mode = (2 if args.cmd == "step"
+            else 1 if args.cmd in ("velstep", "hold")
+            else 0 if args.cmd == "check"      # 力矩模式 + T0 → 轴自由，便于手转
+            else None)
     try:
         if not arm_telemetry(bench, args.tel_ms, mode=mode, limit=args.limit):
             return 4
@@ -724,7 +789,7 @@ def main():
         bench.clear()
 
         handler = {"step": cmd_step, "velstep": cmd_velstep, "hold": cmd_hold,
-                   "repro": cmd_repro, "raw": cmd_raw}[args.cmd]
+                   "repro": cmd_repro, "raw": cmd_raw, "check": cmd_check}[args.cmd]
         handler(bench, args)
         if bench.bad_lines:
             print(f"  ⚠ 有 {bench.bad_lines} 行遥测解析失败（丢字节/截断，可加大 --tel-ms）")

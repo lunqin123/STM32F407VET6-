@@ -64,6 +64,17 @@
 
 **★ OLED 与电机控制循环（2026-09-06 确诊）：全帧 sendBuffer 1KB 阻塞 ~25-30ms，10Hz 定时刷新 = 每秒冻结 10 次 = 电机顿挫（闭环更敏感）。解法两级：main.cpp 事件驱动（参数变才画）；closedloop.cpp 两段式（静态区事件驱动 + 动态区 updateDisplayArea 局部发 256B/4Hz）。任何含 move()/loopFOC() 的主循环禁止周期性全帧刷新。**
 
+**★★ "角度恒为 0" 根因与自诊断（2026-09-12 源码级确诊，已解决）**：
+- 根因链：**12V 未通电 → `alignSensor()` 测不到转动 → 返回 0 → `sensor_direction` 保持 `Direction::UNKNOWN(=0)` → `shaftAngle() = 0 × getAngle() = 0`**；且 `initFOC()` 失败分支会调 `disable()` → driver enabled=0，之后电机也不会转
+- **`shaft_angle` 恒 0 与"编码器损坏"症状完全一致**，不可区分 → 必须看**编码器原始角 raw**（不乘 sensor_direction）
+- **`loopFOC()` 第一行就 `sensor->update()`，先于 `enabled` 判断**（BLDCMotor.cpp）→ 即便驱动关闭，raw 依然新鲜 → **无 12V 也能验编码器**
+- 固件已加 `Z` 命令 + 上电自动体检 `printDiag()`（I2C 扫描/方向/zero_electric_angle/motor_status/driver enabled/raw/shaft_angle + 结论行）
+- 遥测 D 行为 **7 段**：`D,<ms>,<mode>,<tgt>,<ang>,<vel>,<raw>`（旧 6 段仍兼容解析）
+- 工具 `serial_bench.py` 新子命令 **`check`**：力矩模式+`T0` 让轴自由 → 手转转轴看 raw 跨度（>5° 即编码器正常）。**上机第一步永远先跑它**
+- 实测证据：`raw=5.4778 rad` + `I2C: 0x36 0x3C` + `status=0xE` + `enabled=0` → 编码器完好，**唯一缺对齐动力，通电+RESET 即解决**
+
+**★ 沙箱：`rm -rf .pio/build/<env>` 会被 SAFE_DELETE 拦截**（count>50 需批量确认）→ 用 `&&` 串联时短路，pio 根本不执行。实测**不预删也能正常增量编译**（只重编改动文件），非必要不要预删。
+
 **规划**：P1 单轴视觉追踪(PC+摄像头) → P2 两轴(第2个C2208+支架) → P3 OpenMV/K210 边缘化视觉。
 **学习路线（2026-09-03 制定）**：详见 `D:\STM32F407VET6\学习路线图.md`——6阶段（控制理论补课→P1跑通→FOC深化→ROS2+Linux副技能→LeRobot具身智能→两轴+边缘化），每周10-15h，含已核实的B站资源（江协PID BV1G9zdYQEr3、灯哥开源SimpleFOC、鱼香ROS BV19U4y1n7CQ、赵虚左 BV1VB4y137ys、DR_CAN space 230105574）与简历里程碑表。纪律：动手:看视频≥1:1，每阶段产出可见物。
 **电源结论（2026-09-04 反接事故后修正）**：原"12V 适配器方案"作废。改用**带限流(CC)的可调直流电源 3-24V / 0-5A**，核心价值是预设限流（如 0.5A）防止再次烧毁。纯调电压无 CC 的便宜货无保护价值。用户已确认采购此规格。
