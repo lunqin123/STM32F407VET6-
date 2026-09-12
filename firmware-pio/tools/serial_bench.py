@@ -438,15 +438,27 @@ def report_hold(name, m):
 # ============================================================
 # 测试序列
 # ============================================================
+def current_angle(bench):
+    """读遥测里最新的 shaft_angle（读的是电机对象的缓存成员，零副作用）。"""
+    bench.pump(0.3)
+    return bench.samples[-1].angle if bench.samples else 0.0
+
+
 def run_step_test(bench, args, step_deg, tag="step"):
-    """位置阶跃：稳到起点 → 采基线 → 阶跃 → 采满。返回 (samples, step_idx)"""
-    target = math.radians(step_deg)
-    start = math.radians(args.start_deg)
-    bench.send(f"T{start:.4f}")
+    """位置阶跃：先守住【当前位置】→ 采基线 → 相对阶跃 → 采满。
+
+    ★ 为什么起点必须是"当前位置"，而不是绝对角 0（已实测踩过这个坑）：
+      电机轴的**累计角**会随实验不断累积 —— 跑过 hold 之后可能已在第 26 圈。
+      此时若有绝对 `T0`，电机会一路倒转几十圈，而 --settle 完全来不及，
+      于是"基线段"采到的是电机在狂奔，会被误读成**失控 / 极限环**。
+      改成"相对当前位置做阶跃"后，无论之前跑过什么都不会再踩这个坑。
+    """
+    cur = current_angle(bench)
+    bench.send(f"T{cur:.4f}")                                # 守住当前位置（不动）
     bench.pump(args.settle)
     bench.clear()
     bench.pump(args.pre)
-    bench.send(f"T{target:.4f}")
+    bench.send(f"T{cur + math.radians(step_deg):.4f}")        # 相对阶跃
     bench.pump(args.record)
     idx, _ = find_step_index(bench.samples)
     return bench.samples, idx
@@ -502,7 +514,10 @@ def raw_span(samples):
 
 
 def cmd_raw(bench, args):
-    bench.send(f"T{math.radians(args.start_deg):.4f}", settle=0.5)
+    # 先切位置模式再下发角度：否则若固件停在速度模式，T<角度> 会被当成"目标转速"
+    # （角度累计值可能很大）→ 电机瞬间狂转。先 M2 + 守住当前位置最安全。
+    bench.send("M2")
+    bench.send(f"T{current_angle(bench):.4f}", settle=0.5)
     bench.clear()
     bench.pump(args.duration)
     print(f"\n[原始抓取] {len(bench.samples)} 样本，{bench.sample_rate():.1f} Hz")
@@ -706,7 +721,8 @@ def build_parser():
 
     p = sub.add_parser("step", parents=[common], help="位置阶跃")
     p.add_argument("--target-deg", type=float, default=90.0)
-    p.add_argument("--start-deg", type=float, default=0.0)
+    p.add_argument("--start-deg", type=float, default=0.0,
+                   help="已忽略：阶跃现在以【当前位置】为起点，避免累计角陷阱")
     p.add_argument("--settle", type=float, default=2.0, help="阶跃前稳定时间 s")
     p.add_argument("--pre", type=float, default=1.0, help="基线采集 s")
     p.add_argument("--record", type=float, default=4.0, help="阶跃后采集 s")
@@ -728,7 +744,7 @@ def build_parser():
     p.add_argument("--test", choices=["step", "velstep"], default="step")
     p.add_argument("--repeat", type=int, default=10)
     p.add_argument("--target-deg", type=float, default=90.0)
-    p.add_argument("--start-deg", type=float, default=0.0)
+    p.add_argument("--start-deg", type=float, default=0.0, help="已忽略（同 step）")
     p.add_argument("--speed", type=float, default=3.0)
     p.add_argument("--settle", type=float, default=2.0)
     p.add_argument("--pre", type=float, default=1.0)
