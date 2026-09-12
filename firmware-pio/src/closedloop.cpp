@@ -18,6 +18,16 @@
  *   T<数字>  设目标（速度环=rad/s；位置环=弧度，如 T3.14 转到半圈）
  *   M<0/1/2> 切模式：0=力矩 1=速度（默认） 2=位置
  *   L<数字>  调电压上限（起步 2V，确认不抖再调大）
+ *   F<数字>  速度低通 Tf（低速量化噪声主滤波器）
+ *   P/I<数字> 速度环 PID    A<数字> 位置环 P    V<数字> 速度上限(rad/s)
+ *   O<毫秒>  遥测周期（0=关闭，**默认关闭**）。开启后每周期输出一行：
+ *              D,<ms>,<mode>,<target_rad>,<angle_rad>,<velocity_rad_s>
+ *            供 tools/serial_bench.py 自动采数。最小 5ms（200Hz）。
+ *
+ * 【为什么遥测默认关闭】本文件是闭环控制固件，任何周期性串口输出都在
+ *   抢主循环时间。Serial 走 USB CDC，若主机不读、发送缓冲满，write 会阻塞
+ *   ——和"OLED 全帧刷新导致顿挫"是同一类问题。故：默认关闭；开启后仍用
+ *   availableForWrite() 兜底，缓冲不够就丢样本（丢样本可接受，阻塞不可接受）。
  *
  * 【安全】VOLTAGE_LIMIT 起步 2V；initFOC() 上电会轻微动一下做电角度对齐，正常。
  * ============================================================ */
@@ -57,6 +67,8 @@ void doLimit (char *cmd) { command.scalar(&motor.voltage_limit, cmd); }
 void doTf    (char *cmd) { command.scalar(&motor.LPF_velocity.Tf, cmd); }   // F：速度滤波
 void doP     (char *cmd) { command.scalar(&motor.PID_velocity.P, cmd); }   // P：速度环比例
 void doI     (char *cmd) { command.scalar(&motor.PID_velocity.I, cmd); }   // I：速度环积分
+void doAp    (char *cmd) { command.scalar(&motor.P_angle.P, cmd); }        // A：位置环 P（在线整定必需）
+void doVlim  (char *cmd) { command.scalar(&motor.velocity_limit, cmd); }   // V：速度上限（位置环斜率）
 void doMode  (char *cmd) {
     int m = cmd ? atoi(cmd) : 1;
     if      (m == 0) motor.controller = MotionControlType::torque;
@@ -64,6 +76,28 @@ void doMode  (char *cmd) {
     else             motor.controller = MotionControlType::velocity;
     Serial.print("mode = ");
     Serial.println(m == 0 ? "torque(力矩)" : (m == 2 ? "angle(位置)" : "velocity(速度)"));
+}
+
+/* ---------- 3b. 遥测（给上位机自动采数用；默认关闭） ---------- */
+static uint32_t tel_ms      = 0;   // 0 = 关闭；>0 = 周期(ms)
+static uint32_t tel_last    = 0;
+static uint32_t tel_sent    = 0;
+static uint32_t tel_dropped = 0;
+
+void doTel(char *cmd) {
+    long v = cmd ? atol(cmd) : 0;
+    if (v < 0) v = 0;
+    if (v > 0 && v < 5) {                       // 1~4ms 会把主循环拖慢，强制抬到 5ms
+        Serial.println("warn: 最小 5ms(200Hz)，已抬到 5ms");
+        v = 5;
+    }
+    tel_ms      = (uint32_t)v;
+    tel_last    = millis();
+    tel_sent    = 0;
+    tel_dropped = 0;
+    Serial.print("telemetry = ");
+    Serial.print(tel_ms);
+    Serial.println(tel_ms ? " ms ON (D,ms,mode,tgt,ang,vel)" : " OFF");
 }
 
 /* ---------- 4. 屏幕绘制（统一走 lib/Screen 公共层，本文件只写绘制回调） ---------- */
@@ -93,7 +127,8 @@ static void drawAux(U8G2 &u)     // 静态：转速/圈数换算 + 限压
 static void drawAngle(U8G2 &u)   // 动态：实测角度（AS5600 真值，局部重发）
 {
     char buf[24];
-    snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
+    /* ★ 读缓存成员，不要调 shaftAngle()（会推进 LPF_angle 状态） */
+    snprintf(buf, sizeof(buf), "Ang %6.1f deg", motor.shaft_angle * 180.0f / PI);
     u.drawStr(0, 60, buf);
 }
 
@@ -156,8 +191,11 @@ void setup()
     command.add('F', doTf,     "velocity LPF Tf (0.01-0.1)");
     command.add('P', doP,      "vel PID P");
     command.add('I', doI,      "vel PID I");
+    command.add('A', doAp,     "angle PID P");
+    command.add('V', doVlim,   "velocity limit rad/s");
+    command.add('O', doTel,    "telemetry period ms (0=off, >=5)");
 
-    Serial.println("就绪。T<速度> M<模式> L<限压> F<滤波> P/I<PID>");
+    Serial.println("就绪。T<目标> M<模式> L<限压> F<滤波> P/I<速度环PID> A<位置环P> V<速度上限> O<遥测ms>");
 }
 
 /* ---------- 6. 主循环 ---------- */
@@ -166,6 +204,33 @@ void loop()
     motor.loopFOC();          // FOC 调制 + 读编码器（闭环核心，必须每帧调）
     motor.move();              // 执行运动控制（用 motor.target）
     command.run();            // 处理串口命令
+
+    /* 遥测（默认关闭，见文件头说明）
+     * ① 单缓冲一次 write —— 不用 SimpleFOC 内置 motor.monitor()，因为它按变量
+     *    分多次 print，一行要十几次小写，USB CDC 开销更大（库源码自己标注
+     *    "significantly slowing the execution down"）。
+     * ② ★ 读 motor.shaft_angle / shaft_velocity 这两个**缓存成员**，
+     *    不要再调 motor.shaftAngle() / shaftVelocity()：后者内部会推进
+     *    LPF_angle / LPF_velocity 滤波器状态，每循环多调一次就等于多滤一次，
+     *    既改变控制环行为、又让数据与控制器实际用值不一致。
+     *    （move() 每周期已刷新这两个成员，读它们零副作用。）
+     * ③ 先查 availableForWrite()：缓冲不够就丢样本并计数，绝不阻塞控制环。 */
+    if (tel_ms) {
+        uint32_t now = millis();
+        if (now - tel_last >= tel_ms) {
+            tel_last = now;
+            static char tb[96];
+            int n = snprintf(tb, sizeof(tb), "D,%lu,%d,%.4f,%.4f,%.4f\n",
+                             (unsigned long)now, (int)motor.controller,
+                             motor.target, motor.shaft_angle, motor.shaft_velocity);
+            if (n > 0 && Serial.availableForWrite() >= n) {
+                Serial.write((const uint8_t *)tb, (size_t)n);
+                tel_sent++;
+            } else {
+                tel_dropped++;
+            }
+        }
+    }
 
     /* OLED（lib/Screen 公共层）：参数变化标脏静态带；角度变了标脏动态带。
      * Screen 内部负责事件驱动全帧 + tile 局部重发 + 息屏/兜底，循环零阻塞设计 */
@@ -182,7 +247,10 @@ void loop()
         last_mode = (uint8_t)motor.controller;
     }
     char abuf[24];
-    snprintf(abuf, sizeof(abuf), "Ang %6.1f deg", motor.shaftAngle() * 180.0f / PI);
+    /* ★ 同样读缓存成员 motor.shaft_angle，不要调 motor.shaftAngle()：
+     * 后者会推进 LPF_angle 滤波器状态（当前 LPF_angle.Tf=0 无害，
+     * 但一旦启用角度滤波，每循环多调一次就会改变控制行为） */
+    snprintf(abuf, sizeof(abuf), "Ang %6.1f deg", motor.shaft_angle * 180.0f / PI);
     if (strcmp(abuf, last_ang) != 0) {
         oled::invalidate(3);
         strcpy(last_ang, abuf);

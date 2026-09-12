@@ -37,3 +37,6 @@ data/
 # OS
 Thumbs.db
 .DS_Store
+
+# 调试台产物（CSV/SVG 每次运行都新增，不入库）
+firmware-pio/tools/runs/

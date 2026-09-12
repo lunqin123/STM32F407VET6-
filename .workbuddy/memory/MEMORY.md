@@ -35,7 +35,12 @@
 - IntelliSense：勿设 C_Cpp.default.compileCommands（会截胡），用 gen_intellisense.py 生成 includePath
 - **★ printf 浮点必须加 `-Wl,-u,_printf_float`**（build_flags）：stm32duino 的 newlib-nano 默认裁掉 %f，snprintf 输出浮点为空（症状：OLED 只显示单位没有数字）。**不能写 `-u _printf_float`** —— PIO 会拆成孤立 -u 吞掉 -mcpu，CMSIS 报 "Unknown Arm architecture profile"。AS5600 硬件已实机验证正常（2026-09-04：RAW 读数/AGC=8/MAG=2137 全正常）。
 - **★ SimpleFOC Sensor 是 pull 模型**：所有 getter（getMechanicalAngle/getAngle/getVelocity）返回内部缓存，必须有人调 `sensor.update()` 才真读芯片。含 `motor.loopFOC()` 的固件由它自动 pull；**不含 loopFOC 的固件（纯传感器应用如 knob）必须自己每帧调 sensor.update()**，否则读数恒为上电初值。API 区别：getAngle()=连续多圈累计角 / getMechanicalAngle()=单圈 0~2π wrap / getSensorAngle()=原始角。增量式读法（旋钮/滚轮）须用浮点累加器攒步进，取整只在显示层。
+- **★★ SimpleFOC 铁律：不要重复调用 `motor.shaftAngle()` / `shaftVelocity()`**（2026-09-12 发现并修复）。二者内部会推进 `LPF_angle` / `LPF_velocity` 滤波器状态——每循环多调一次就等于多滤一次，**既改变控制环行为、又使显示/日志数据与控制器实际用值不一致**。正确做法：读 **public 缓存成员 `motor.shaft_angle` / `motor.shaft_velocity`**（`BLDCMotor::move()` 每周期已刷新，库注释明确 "read value even if motor is disabled to keep the monitoring updated"）。`gimbal_tracker.cpp` 已自行规避；`closedloop.cpp` 2026-09-12 修了 3 处。
+- **★ 闭环固件的周期性串口输出必须"非阻塞"**（2026-09-12 确立）：USB CDC 的 `write()` 在主机不读、缓冲满时会阻塞，与"OLED 全帧刷新致顿挫"是同一类问题。规范做法：**单缓冲一次 write + 先查 `Serial.availableForWrite()`，缓冲不够就丢样本并计数**（丢样本可接受，阻塞不可接受）。不要用内置 `motor.monitor()`（按变量分多次 print，库源码自注 "significantly slowing the execution down"）。遥测**默认关闭**。
 - 无动力联调固件：`[env:knob]`（knob.cpp）= AS5600 智能旋钮 0~100；`[env:as5600test]` = 直读寄存器底层诊断。
+- **★ 调试台（2026-09-12 新建）：`firmware-pio/tools/serial_bench.py`** —— 自动跑测试序列 → 采遥测 → 算指标 → 出 CSV + SVG，**零额外依赖**（本机无 numpy/matplotlib，图自绘）。子命令：`step` / `velstep` / `hold` / `repro` / `raw` / `selftest`。`--set` 可下发任意固件命令，使整定矩阵可脚本化。**`selftest` 无需硬件即验证指标算法本身**（解析解二阶系统 ζ=0.5 → 理论超调 16.30%，实测精确吻合）——上位机工具不必"等上机才知道准不准"。阶跃时刻由**遥测 `target` 字段变化**在设备侧判定，不受 USB 延迟影响。
+- 遥测协议（closedloop）：`O<ms>` 开启（默认关，最小 5ms），输出 `D,<ms>,<mode>,<target_rad>,<angle_rad>,<velocity_rad_s>`；整定配套命令 `A<数字>`=位置环 P、`V<数字>`=速度上限。
+- **整定手册：`firmware-pio/调试台与整定矩阵.md`** —— E1 电压上限 → E2 速度低通 F（含 **F 0.05→0.1 的双指标定稿法**：hold 找纹波拐点 + velstep 确认调节时间未恶化 >20%）→ E3 速度环 P → E4 速度环 I → E5 位置环 A/V → E6 可复现性验收（CV<15%）；含记录表模板、三档验收标准（L1/L2/L3）与安全清单。方法学：**OFAT，一次只改一个参数**。
 
 **沙箱坑（本机开发环境）**：
 - pio 全路径 `/c/Users/16689/.platformio/penv/Scripts/pio.exe`
