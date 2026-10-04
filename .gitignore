@@ -44,6 +44,9 @@ firmware-pio/tools/runs/
 # 调试台运行日志（临时排障记录，每次覆盖；无长期价值）
 firmware-pio/*.log
 
+# IntelliSense 索引（由 gen_intellisense.py 生成，1MB+，随依赖变化频繁变动）
+firmware-pio/compile_commands.json
+
 # 题库排版脚本的中间态备份（只保留改版前的原始排版一份，
 # 其余为当日迭代快照，可由 git 历史复现）
 archive/底层经典问题集-排版v1-2026*.md
