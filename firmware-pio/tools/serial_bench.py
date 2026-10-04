@@ -50,11 +50,19 @@ F407 闭环调试台 —— 自动跑测试序列、采遥测、算指标、出�
      --settle 来不及，采到的"基线"其实在狂奔，会被误判成失控/极限环（已实测踩过）。
 
 【退出时一定会做的事（安全设计）】
-  ① 把增益恢复到已验证的稳定点 SAFE_PARK（P0.5 / I10 / F0.03）
-  ② 发送 O0 关闭遥测
-  理由：本工具用 --set 改的是固件 **RAM** 里的增益，退出后依然生效。曾因把失稳
-  增益（P=2.0）留在固件里，导致电机在会话结束后持续剧烈振荡，只能靠复位救回。
+  ① 停转：切回速度模式 M1 + 目标 T0
+  ② 把参数恢复到已验证的稳定点 SAFE_PARK（P0.5 / I10 / F0.03 / V3 / L2）
+  ③ 发送 O0 关闭遥测
+  理由：本工具改的是固件 **RAM**（增益 / 目标 / 运动模式都留在里面），退出后依然生效。
+  两条实测事故：
+    · 把失稳增益 P=2.0 留在固件 → 电机持续剧烈振荡，只能远程复位救回；
+    · 失控实验把速度模式目标留成 134451 rad/s → 脚本退出后电机仍全速旋转。
   → 想保留自定义增益，请实验后自行重新下发，或直接写进固件默认值。
+
+【命令语义红线（踩过两次，务必记住）】
+  `T<数字>` 的含义**取决于当前运动模式**：位置模式 = 目标弧度，速度模式 = 目标转速。
+  模式错了，同一条命令就是另一种指令，而且**遥测看起来完全正常**。
+  → 每个子命令都显式声明模式；run_*_test 内部还会自带模式断言。
 """
 
 import argparse
@@ -80,13 +88,24 @@ MODE_NAME = {0: "torque", 1: "velocity", 2: "angle"}
 RAD2DEG = 180.0 / math.pi
 DEFAULT_OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
 
-# ★★ 退出时恢复的「安全增益」（2026-09-12 实测整定的稳定点：
-#    90° 阶跃 超调 0.0% / 调节 1194 ms / 稳态误差 +0.066° / 纹波 0.26°）。
+# ★★ 退出时恢复的「安全增益」（2026-09-12 实测整定的稳定点）。
 #    【为什么必须有这个】本工具的实验会通过 --set 改固件 RAM 里的增益，
 #    而**退出时不会自动还原**。实测踩过一次严重事故：最后一轮把 P 调到 2.0
 #    （失稳点）后退出了，增益留在固件里，电机随后持续剧烈振荡，
 #    只能靠远程复位救回。此后：**任何会话结束都必须把电机留在稳定状态。**
-SAFE_PARK = ["P0.5", "I10", "F0.03"]
+#
+#   ★ 2026-09-12 二次修正（重要方法论教训）：`A`（位置环 P）原本**漏在名单外**，
+#     而它同样是稳定性参数 —— 后果是**污染了整整一轮参数扫描**：
+#     screen_step 依次跑 "-" → "V2" → "A8" → "I5" → "F0.06" 时，A8 之后
+#     A 一直是 8 且从未被还原，于是 I5 / F0.06 两组的"干净"其实是 A=8 带来的，
+#     与 I / F 毫无关系。**差点据此写进固件默认值的是一组假结论。**
+#     → 教训一：**凡是能改到电机动态的参数，都必须列入 SAFE_PARK**。
+#     → 教训二：做配置扫描时，每组的差异参数都要在 --cfg 里**显式写出**，
+#       绝不能依赖"上一组留在 RAM 里的状态"。
+#   实测（每组 4 次、L=2V、V=3）：A20 → 纹波 13~21°、四跑四振（~19 Hz 极限环）；
+#   A8 → 纹波 0~0.35°、四跑四干净。**位置环增益才是这台机器当前的真杠杆**，
+#   而"降低速度上限 V"经复测**并不能**止振（V2 仍四跑三振）。
+SAFE_PARK = ["P0.5", "I10", "F0.05", "V3", "L2", "A10"]
 
 
 # ============================================================
@@ -204,7 +223,11 @@ def open_serial(port, baud):
 def arm_telemetry(bench, tel_ms, mode=None, limit=None):
     """开启遥测并确认真的有数据回来 —— 没有就给出排查清单。"""
     if mode is not None:
-        bench.send(f"M{mode}", settle=0.2)
+        # ★ 切模式与置目标必须**背靠背**：`T` 的含义随模式而变，若 RAM 里残留一个
+        #   大 target（如位置模式留下的角度累计值，动辄几千弧度），切模式那一瞬间
+        #   它会被当成"目标转速"→ 电机立刻全速旋转。中间不能留 settle 的时间窗。
+        bench.ser.write(f"M{mode}\nT0\n".encode())
+        bench.pump(0.3)
     if limit is not None:
         bench.send(f"L{limit}", settle=0.2)
     bench.send(f"O{tel_ms}")
@@ -229,6 +252,23 @@ def _mean(xs):
 
 def _rms(xs):
     return math.sqrt(sum(x * x for x in xs) / len(xs)) if xs else 0.0
+
+
+def _cv(vs):
+    """变异系数 %（标准差 / |均值|）。子命令 repro 的验收判据用它。
+
+    · 标准差 ≈ 0            → 0.0  （每次都一样，**这是好结果**，不是"无数据"）
+    · 均值 ≈ 0 但仍有离散   → nan  （相对离散度无意义，无法评估）
+    · 样本 < 2              → nan
+    """
+    if len(vs) < 2:
+        return float("nan")
+    mu, sd = _mean(vs), statistics.pstdev(vs)
+    if sd < 1e-12:
+        return 0.0
+    if abs(mu) < 1e-9:
+        return float("nan")
+    return sd / abs(mu) * 100.0
 
 
 def find_step_index(samples):
@@ -462,6 +502,40 @@ def current_angle(bench):
     return bench.samples[-1].angle if bench.samples else 0.0
 
 
+def _enter_angle_mode(bench):
+    """★ 安全进入位置模式：先停稳 → 再读角 → 最后把 M2 与 T<当前角> 背靠背发出。
+
+    为什么不能简单地 `send("M2")` 就完事 —— 这里是踩了两次才搞清的两个坑：
+
+    ① **语义坑**：`T<数字>` 的含义随运动模式而变。
+         位置模式 = 目标**弧度**    速度模式 = 目标**转速 rad/s**
+       上电默认是速度模式，此时脚本发的 `T6.1`（本意"转到 6.1 弧度"）被当成
+       "以 6.1 rad/s 旋转" → 电机立刻匀速狂奔，下一发再加速度。
+       实测：10 轮复现性实验全都变成匀速旋转，累计角从 349° 涨到 139944°。
+       **最阴的是遥测完全正常、target 字段也在变、指标还照样算得出来。**
+
+    ② **跳变坑**：位置模式的 target 是**绝对**角度，而轴的累计角会随实验一直累积
+       （每跑一次阶跃 +90°，失控过就是几千弧度）。若"先发 M2 → 再花时间读角 →
+       再发目标角"，中间那几十毫秒里位置环看到的是"目标 0 vs 实际 3531 rad"的
+       巨额误差 → 立刻按 `velocity_limit` 全速倒转（实测抓到 -11 rad/s 后
+       被起飞前检查拦下）。
+
+    → 正确顺序：速度模式停稳（此时角度不变，读出来才有效）→ 背靠背发
+       `M2` 与 `T<该角度>`，中间不留任何时间窗 → 位置环误差为 0，平稳接管。
+    返回进入位置模式时锁定的起点角度（弧度）。
+    """
+    bench.send("M1", settle=0.15)          # 先确保处于速度模式，下一发 T0 才是"停转"
+    bench.send("T0", settle=0.20)
+    for _ in range(12):                    # 等真正停稳（最多约 2.4 s）
+        bench.pump(0.2)
+        if bench.samples and abs(bench.samples[-1].vel) < 0.5:
+            break
+    cur = current_angle(bench)             # 停住了 → 角度稳定，可作为目标
+    bench.ser.write(f"M2\nT{cur:.4f}\n".encode())   # ★ 两条背靠背，不留时间窗
+    bench.pump(0.35)
+    return cur
+
+
 def run_step_test(bench, args, step_deg, tag="step"):
     """位置阶跃：先守住【当前位置】→ 采基线 → 相对阶跃 → 采满。
 
@@ -470,9 +544,12 @@ def run_step_test(bench, args, step_deg, tag="step"):
       此时若有绝对 `T0`，电机会一路倒转几十圈，而 --settle 完全来不及，
       于是"基线段"采到的是电机在狂奔，会被误读成**失控 / 极限环**。
       改成"相对当前位置做阶跃"后，无论之前跑过什么都不会再踩这个坑。
+
+    ★★ 进入位置模式必须走 `_enter_angle_mode()`（2026-09-12 连踩两个坑，
+      代价是一次 80 秒失控）：`T<数字>` 的含义随运动模式变，而且位置模式下的
+      目标角与**累计角**差一点就会按速度上限全速倒转。详见该函数的文档。
     """
-    cur = current_angle(bench)
-    bench.send(f"T{cur:.4f}")                                # 守住当前位置（不动）
+    cur = _enter_angle_mode(bench)
     bench.pump(args.settle)
     bench.clear()
     bench.pump(args.pre)
@@ -483,7 +560,11 @@ def run_step_test(bench, args, step_deg, tag="step"):
 
 
 def run_velstep_test(bench, args, speed):
-    bench.send("T0.0000")
+    # ★ M1 与 T0 背靠背：`T` 的含义随模式变，若 RAM 里残留一个大 target
+    #   （例如位置模式留下的角度累计值，动辄几千弧度），切到速度模式的那一瞬间
+    #   它会被当成"目标转速"→ 全速旋转。中间绝不能插 settle。
+    bench.ser.write(b"M1\nT0\n")
+    bench.pump(0.4)
     bench.pump(args.settle)
     bench.clear()
     bench.pump(args.pre)
@@ -494,6 +575,8 @@ def run_velstep_test(bench, args, speed):
 
 
 def run_hold_test(bench, args, speed):
+    bench.ser.write(b"M1\nT0\n")     # 同 run_velstep_test：切模式与置目标背靠背
+    bench.pump(0.4)
     bench.send(f"T{speed:.4f}")
     bench.pump(args.settle)
     bench.clear()
@@ -532,10 +615,9 @@ def raw_span(samples):
 
 
 def cmd_raw(bench, args):
-    # 先切位置模式再下发角度：否则若固件停在速度模式，T<角度> 会被当成"目标转速"
-    # （角度累计值可能很大）→ 电机瞬间狂转。先 M2 + 守住当前位置最安全。
-    bench.send("M2")
-    bench.send(f"T{current_angle(bench):.4f}", settle=0.5)
+    # 走 _enter_angle_mode 安全进位置模式：既避免"T<弧度> 被当成转速"，
+    # 也避免"先 M2 再读角"中间的角度跳变狂奔（两个坑都实测踩过）。
+    _enter_angle_mode(bench)
     bench.clear()
     bench.pump(args.duration)
     print(f"\n[原始抓取] {len(bench.samples)} 样本，{bench.sample_rate():.1f} Hz")
@@ -630,21 +712,79 @@ def cmd_repro(bench, args):
         return
 
     print(f"\n=== 可复现性汇总（{len(rows)}/{args.repeat} 次有效）===")
-    print(f"  {'指标':<16}{'均值':>12}{'最小':>12}{'最大':>12}{'标准差':>12}")
-    for key, label, sc in (("overshoot_pct", "超调 %", 1.0),
+    print(f"  {'指标':<14}{'均值':>11}{'最小':>11}{'最大':>11}{'标准差':>11}{'CV':>10}")
+    for key, label, sc in (("rise_s", "上升时间 ms", 1000.0),
+                           ("overshoot_pct", "超调 %", 1.0),
                            ("settle_s", "调节时间 ms", 1000.0),
                            ("ss_err", "稳态误差", RAD2DEG),
                            ("ripple_pp", "纹波峰峰", RAD2DEG)):
         vs = [r[key] for r in rows if r.get(key) is not None]
         if len(vs) < 2:
             continue
-        print(f"  {label:<16}{_mean(vs) * sc:>12.3f}{min(vs) * sc:>12.3f}{max(vs) * sc:>12.3f}"
-              f"{statistics.pstdev(vs) * sc:>12.3f}")
-    spread = [r["settle_s"] for r in rows if r.get("settle_s") is not None]
-    if spread and _mean(spread) > 0:
-        cv = statistics.pstdev(spread) / _mean(spread) * 100
-        print(f"\n  调节时间离散度(CV) = {cv:.1f}%  →  "
-              + ("良好（<15%），可写进简历" if cv < 15 else "偏大，先查机械/接线是否松动再谈调参"))
+        mu, sd = _mean(vs), statistics.pstdev(vs)
+        cv = _cv(vs)
+        cvs = "        --" if cv != cv else f"{cv:>9.1f}%"
+        print(f"  {label:<14}{mu * sc:>11.3f}{min(vs) * sc:>11.3f}{max(vs) * sc:>11.3f}"
+              f"{sd * sc:>11.3f}{cvs}")
+
+    # ★★ L1 验收判据：同一命令重复 N 次，瞬态指标离散度 CV < 15%。
+    #    两个必须一起考虑的点：
+    #    ① "上升时间"必须一起判 —— 本项目实测过的翻车正是"稳态两次完全一致、
+    #       上升时间却差 6 倍"（125 vs 802 ms），只看调节时间会漏掉这种不一致。
+    #    ② 均值本身接近 0 的指标（如超调 0.1%）CV 会被放大成无意义的大数字
+    #       （实测：超调 0.09~0.29%，CV 算出 38%）。此时必须改用**绝对极差**
+    #       判据，否则会因为"太干净"反而被判成不可复现。
+    print("\n  --- L1 验收判据（CV < 15%，或绝对极差足够小）---")
+    keys = (("rise_s",        "上升时间", 1000.0, 0.050),
+            ("settle_s",      "调节时间", 1000.0, 0.050),
+            ("overshoot_pct", "超调",       1.0,   2.0))
+    verdicts = {}
+    for key, label, sc, floor in keys:
+        vs = [r[key] for r in rows if r.get(key) is not None]
+        if len(vs) < 2:
+            print(f"  {label:<10} 无法评估（样本不足）")
+            verdicts[key] = None
+            continue
+        cv = _cv(vs)
+        spread = (max(vs) - min(vs)) * sc
+        if cv != cv:
+            print(f"  {label:<10} 无法评估（均值≈0 且仍有离散）")
+            verdicts[key] = None
+            continue
+        ok = (cv < 15.0) or (spread <= floor * sc)
+        verdicts[key] = ok
+        print(f"  {label:<10} CV {cv:>6.1f}%   极差 {spread:>8.3f}   "
+              f"{'✓ 通过' if ok else '✗ 偏大'}")
+
+    # ★★ 纹波必须**单独**用绝对判据 —— 这是踩过的第二个假阳性，比第一个更隐蔽：
+    #    持续振荡（极限环）的"瞬态指标"往往**极其重复**（每次都振 ~20°、都 4000ms 不收敛、
+    #    超调每次都是 11%），于是上升/调节/超调三项的 CV 都很小 → 上面三条判据
+    #    会齐刷刷判"✓ 通过"。实测 A=20 时电机稳定维持 ~19 Hz / ±10° 极限环，
+    #    本工具却打印了"三项全过：瞬态数字可以对外引用（可以写进简历）"。
+    #    一台**持续振荡的机器根本不可能有值得写进简历的瞬态数字**。
+    #    故纹波单列一条**绝对**判据（不适用 CV —— 极限环的纹波 CV 反而很小）。
+    rp = [r["ripple_pp"] for r in rows if r.get("ripple_pp") is not None]
+    if rp:
+        rp_max_deg = max(rp) * RAD2DEG
+        ok_rp = rp_max_deg <= 1.0
+        verdicts["ripple_pp"] = ok_rp
+        print(f"  {'纹波峰峰':<10} 最大 {rp_max_deg:>8.3f}°  "
+              f"{'✓ 通过 (<1°)' if ok_rp else '✗ 持续振荡（极限环）→ 本组数据作废'}")
+
+    # ★★ 必须**全部**可评估且全过才算通过。
+    #    旧写法是"过滤掉无法评估的，再看剩下的是否全过" —— 于是在
+    #    "上升时间/超调 无法评估"时，只剩调节时间一项就打印了"三项全过"。
+    #    这是**假阳性**：差点把一次电机失控（10 轮全是 6 rad/s 匀速旋转、
+    #    累计角涨到 139944°）的数据当成合格结论上报。判据宁可保守。
+    if any(v is None for v in verdicts.values()):
+        print("  → 有指标无法评估 → **不能判定为可复现**。"
+              "先查测试条件（运动模式 / 机械边界 / 接线），别急着调参数。")
+    elif all(verdicts.values()):
+        print("  → 全部通过：瞬态数字可以对外引用（可以写进简历）")
+    else:
+        print("  → 有指标未过判据：**瞬态数字暂不可对外引用**。")
+        print("    排查顺序：机械边界（定子固定/轴自由/有无负载）→ 接线与预紧 → "
+              "每次阶跃的起始位置 → 最后才怀疑参数。")
     save(bench, args, f"repro_{args.test}", f"repeatability {args.repeat}x {args.test}", idx)
 
 
@@ -805,15 +945,37 @@ def main():
         print(f"  [dev] {line}")
     bench.logs.clear()
 
-    mode = (2 if args.cmd == "step"
-            else 1 if args.cmd in ("velstep", "hold")
-            else 0 if args.cmd == "check"      # 力矩模式 + T0 → 轴自由，便于手转
-            else None)
+    # ★ 每个子命令都必须**显式**声明运动模式（未声明 / None 也是有意的）。
+    #   `T<数字>` 的含义随模式而变（位置=目标弧度 / 速度=目标转速），
+    #   模式没设对，同一条命令就成了另一种指令 —— 而遥测里看不出任何异常。
+    #   历史 bug：repro 落到 else=None 从未设模式 → 固件停在默认速度模式 →
+    #   位置阶跃脚本发的 T<弧度≈6.1> 被当成 T<6.1 rad/s> → 10 轮全部失控狂奔。
+    #   注意：**位置模式不在这里设** —— 它必须走 _enter_angle_mode()，
+    #   否则会踩"先 M2 后读角"的角度跳变（见该函数文档）。
+    if args.cmd in ("velstep", "hold"):
+        mode = 1
+    elif args.cmd == "repro" and getattr(args, "test", "step") != "step":
+        mode = 1
+    elif args.cmd == "check":
+        mode = 0                                # 力矩模式 + T0 → 轴自由，便于手转
+    else:
+        mode = None                             # step / repro-step / raw：内部自理
     try:
         if not arm_telemetry(bench, args.tel_ms, mode=mode, limit=args.limit):
             return 4
         print(f"[就绪] 遥测 {args.tel_ms}ms，实测 {bench.sample_rate():.1f} Hz"
               f"{'' if args.limit is None else f'，限压 {args.limit}V'}\n")
+
+        # ★ 起飞前检查：电机必须是静止的。
+        #   若已经在转，说明固件被留在了"带转速目标"的状态（实测发生过：速度模式
+        #   目标 134451 rad/s，测试结束后电机仍全速旋转，靠人发现才停）。此时跑什么
+        #   实验都会采到失控数据 —— 宁可拒测，也不要产出一批"看起来正常、实则全错"
+        #   的数字（这种数据最危险，因为它会被当成结论上报）。
+        v_now = bench.samples[-1].vel if bench.samples else 0.0
+        if abs(v_now) > 1.0:
+            print(f"[中止] 检测到电机已在转动：{v_now:.2f} rad/s —— 先停转再测"
+                  f"（发 M1 然后 T0）。本次未采任何数据。")
+            return 5
 
         extra = getattr(args, "set", None) or []
         if extra:
@@ -831,16 +993,23 @@ def main():
         print("\n[中断] 用户中止")
     finally:
         try:
-            # ★ 先恢复安全增益，再关遥测。顺序不能反：
-            #   若实验把增益留在失稳点（如 P=2.0），关遥测也救不了——电机仍会持续振荡。
-            #   见文件顶部 SAFE_PARK 的说明（已实测踩过，电机剧烈震荡到必须复位）。
+            # ★★ 退出的"安全态"要同时管两件事，缺一不可：
+            #   ① 运动状态：模式切回速度、目标清零。
+            #      实测事故：一次失控实验在速度模式下把目标留成 134451 rad/s，
+            #      脚本退出后电机**仍全速旋转**，直到人发现才停。
+            #   ② 增益状态：再恢复已验证的稳定增益。
+            #      实测事故：把失稳增益 P=2.0 留在 RAM，电机持续剧烈振荡，
+            #      只能靠远程复位救回（见文件顶 SAFE_PARK 说明）。
+            #   最后才关遥测 —— 顺序不能反，否则出问题时连症状都看不到。
+            bench.ser.write(b"M1\n"); time.sleep(0.03)   # 速度模式
+            bench.ser.write(b"T0\n"); time.sleep(0.05)   # 目标 0 → 停转
             for c in SAFE_PARK:
                 bench.ser.write((c + "\n").encode())
                 time.sleep(0.03)
             bench.ser.write(b"O0\n")     # 关闭遥测，不留负担给控制环
             time.sleep(0.1)
             bench.ser.close()
-            print(f"[收尾] 已恢复安全增益 {' '.join(SAFE_PARK)}，关闭遥测并释放串口")
+            print(f"[收尾] 已停转(M1/T0) + 恢复安全增益 {' '.join(SAFE_PARK)}，关闭遥测并释放串口")
         except Exception:
             pass
     return 0
